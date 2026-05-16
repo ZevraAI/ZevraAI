@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: nexus-postgres
+    environment:
+      POSTGRES_DB: nexus_db
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: nexus_local
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sei-nexus-db/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexus -d nexus_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - nexus-net
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./sei-nexus-ai
+      dockerfile: Dockerfile
+    container_name: nexus-backend
+    ports:
+      - "8090:8090"
+    environment:
+      NEXUS_DB_URL: jdbc:postgresql://postgres:5432/nexus_db
+      NEXUS_DB_USERNAME: nexus
+      NEXUS_DB_PASSWORD: nexus_local
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY}
+      AZURE_OPENAI_CHAT_DEPLOYMENT: ${AZURE_OPENAI_CHAT_DEPLOYMENT:-gpt-4o}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-text-embedding-ada-002}
+      NEXUS_STORAGE_PATH: /data/documents
+      NEXUS_JWT_SECRET: ${NEXUS_JWT_SECRET:-local-dev-secret-change-in-production}
+      SPRING_PROFILES_ACTIVE: local
+    volumes:
+      - document_storage:/data/documents
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - nexus-net
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./sei-nexus-ui
+      dockerfile: Dockerfile
+    container_name: nexus-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - nexus-net
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  document_storage:
+    driver: local
+
+networks:
+  nexus-net:
+    driver: bridge

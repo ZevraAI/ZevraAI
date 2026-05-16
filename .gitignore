@@ -1,0 +1,25 @@
+# Backend
+sei-nexus-ai/target/
+sei-nexus-ai/*.jar
+
+# Frontend
+sei-nexus-ui/node_modules/
+sei-nexus-ui/dist/
+
+# Secrets
+.env
+.env.*
+*.env
+
+# IDE
+.idea/
+*.iml
+.vscode/settings.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp logs
+/tmp/
+*.log

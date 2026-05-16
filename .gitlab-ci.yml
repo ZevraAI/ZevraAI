@@ -1,0 +1,309 @@
+# =============================================================================
+# SEI Nexus Platform - GitLab CI/CD Pipeline
+# =============================================================================
+
+stages:
+  - validate
+  - build
+  - test
+  - containerize
+  - deploy-staging
+  - deploy-production
+
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository -Djava.awt.headless=true"
+  MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version"
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  BACKEND_IMAGE: "$CI_REGISTRY_IMAGE/sei-nexus-ai"
+  FRONTEND_IMAGE: "$CI_REGISTRY_IMAGE/sei-nexus-ui"
+  NODE_ENV: production
+
+# Cache Maven dependencies across pipeline runs
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - sei-nexus-ai/.m2/repository
+    - sei-nexus-ui/node_modules/
+
+# ---------------------------------------------------------------------------
+# VALIDATE STAGE
+# ---------------------------------------------------------------------------
+
+validate:backend-style:
+  stage: validate
+  image: maven:3.9.6-eclipse-temurin-17
+  script:
+    - cd sei-nexus-ai
+    - mvn $MAVEN_CLI_OPTS validate checkstyle:check
+  rules:
+    - changes:
+        - sei-nexus-ai/**/*
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+
+validate:backend-pom:
+  stage: validate
+  image: maven:3.9.6-eclipse-temurin-17
+  script:
+    - cd sei-nexus-ai
+    - mvn $MAVEN_CLI_OPTS validate
+  rules:
+    - changes:
+        - sei-nexus-ai/pom.xml
+
+validate:frontend-lint:
+  stage: validate
+  image: node:20-alpine
+  script:
+    - cd sei-nexus-ui
+    - npm ci --prefer-offline
+    - npm run lint
+  rules:
+    - changes:
+        - sei-nexus-ui/**/*
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+
+# ---------------------------------------------------------------------------
+# BUILD STAGE
+# ---------------------------------------------------------------------------
+
+build:backend:
+  stage: build
+  image: maven:3.9.6-eclipse-temurin-17
+  script:
+    - cd sei-nexus-ai
+    - mvn $MAVEN_CLI_OPTS package -DskipTests
+  artifacts:
+    paths:
+      - sei-nexus-ai/target/*.jar
+    expire_in: 1 hour
+  cache:
+    key: "backend-$CI_COMMIT_REF_SLUG"
+    paths:
+      - sei-nexus-ai/.m2/repository
+
+build:frontend:
+  stage: build
+  image: node:20-alpine
+  script:
+    - cd sei-nexus-ui
+    - npm ci --prefer-offline
+    - npm run build
+  artifacts:
+    paths:
+      - sei-nexus-ui/dist/
+    expire_in: 1 hour
+  cache:
+    key: "frontend-$CI_COMMIT_REF_SLUG"
+    paths:
+      - sei-nexus-ui/node_modules/
+
+# ---------------------------------------------------------------------------
+# TEST STAGE
+# ---------------------------------------------------------------------------
+
+test:backend:
+  stage: test
+  image: maven:3.9.6-eclipse-temurin-17
+  services:
+    - name: pgvector/pgvector:pg16
+      alias: postgres
+      variables:
+        POSTGRES_DB: nexus_test
+        POSTGRES_USER: nexus_test
+        POSTGRES_PASSWORD: nexus_test
+  variables:
+    NEXUS_DB_URL: "jdbc:postgresql://postgres:5432/nexus_test"
+    NEXUS_DB_USERNAME: nexus_test
+    NEXUS_DB_PASSWORD: nexus_test
+    NEXUS_JWT_SECRET: ci-test-secret-not-for-production
+    AZURE_OPENAI_ENDPOINT: "https://mock.openai.azure.com"
+    AZURE_OPENAI_API_KEY: "ci-mock-key"
+    AZURE_OPENAI_CHAT_DEPLOYMENT: "gpt-4o"
+    AZURE_OPENAI_EMBEDDING_DEPLOYMENT: "text-embedding-ada-002"
+    NEXUS_STORAGE_PATH: "/tmp/nexus-test-docs"
+    SPRING_PROFILES_ACTIVE: test
+  script:
+    - cd sei-nexus-ai
+    - mvn $MAVEN_CLI_OPTS test
+  artifacts:
+    when: always
+    reports:
+      junit:
+        - sei-nexus-ai/target/surefire-reports/TEST-*.xml
+    paths:
+      - sei-nexus-ai/target/surefire-reports/
+    expire_in: 7 days
+  cache:
+    key: "backend-$CI_COMMIT_REF_SLUG"
+    paths:
+      - sei-nexus-ai/.m2/repository
+
+test:frontend:
+  stage: test
+  image: node:20-alpine
+  script:
+    - cd sei-nexus-ui
+    - npm ci --prefer-offline
+    - npm run test -- --run --reporter=verbose
+  artifacts:
+    when: always
+    reports:
+      junit:
+        - sei-nexus-ui/test-results/*.xml
+    expire_in: 7 days
+  cache:
+    key: "frontend-$CI_COMMIT_REF_SLUG"
+    paths:
+      - sei-nexus-ui/node_modules/
+
+# ---------------------------------------------------------------------------
+# CONTAINERIZE STAGE
+# ---------------------------------------------------------------------------
+
+.docker-login: &docker-login
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+
+containerize:backend:
+  stage: containerize
+  image: docker:24.0
+  services:
+    - docker:24.0-dind
+  <<: *docker-login
+  needs:
+    - job: build:backend
+      artifacts: true
+    - job: test:backend
+  script:
+    - |
+      docker build \
+        --cache-from "$BACKEND_IMAGE:latest" \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
+        --tag "$BACKEND_IMAGE:$CI_COMMIT_SHA" \
+        --tag "$BACKEND_IMAGE:$CI_COMMIT_REF_SLUG" \
+        ./sei-nexus-ai
+    - docker push "$BACKEND_IMAGE:$CI_COMMIT_SHA"
+    - docker push "$BACKEND_IMAGE:$CI_COMMIT_REF_SLUG"
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag "$BACKEND_IMAGE:$CI_COMMIT_SHA" "$BACKEND_IMAGE:latest"
+        docker push "$BACKEND_IMAGE:latest"
+      fi
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_BRANCH =~ /^release\/.*/'
+
+containerize:frontend:
+  stage: containerize
+  image: docker:24.0
+  services:
+    - docker:24.0-dind
+  <<: *docker-login
+  needs:
+    - job: build:frontend
+      artifacts: true
+    - job: test:frontend
+  script:
+    - |
+      docker build \
+        --cache-from "$FRONTEND_IMAGE:latest" \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
+        --tag "$FRONTEND_IMAGE:$CI_COMMIT_SHA" \
+        --tag "$FRONTEND_IMAGE:$CI_COMMIT_REF_SLUG" \
+        ./sei-nexus-ui
+    - docker push "$FRONTEND_IMAGE:$CI_COMMIT_SHA"
+    - docker push "$FRONTEND_IMAGE:$CI_COMMIT_REF_SLUG"
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag "$FRONTEND_IMAGE:$CI_COMMIT_SHA" "$FRONTEND_IMAGE:latest"
+        docker push "$FRONTEND_IMAGE:latest"
+      fi
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_BRANCH =~ /^release\/.*/'
+
+# ---------------------------------------------------------------------------
+# DEPLOY STAGING STAGE
+# ---------------------------------------------------------------------------
+
+deploy:staging:
+  stage: deploy-staging
+  image: alpine:3.19
+  needs:
+    - containerize:backend
+    - containerize:frontend
+  before_script:
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$STAGING_SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - ssh-keyscan -H "$STAGING_HOST" >> ~/.ssh/known_hosts
+  script:
+    - |
+      ssh "$STAGING_USER@$STAGING_HOST" "
+        export CI_REGISTRY_IMAGE='$CI_REGISTRY_IMAGE'
+        export IMAGE_TAG='$CI_COMMIT_SHA'
+        export NEXUS_DB_USERNAME='$STAGING_DB_USERNAME'
+        export NEXUS_DB_PASSWORD='$STAGING_DB_PASSWORD'
+        export AZURE_OPENAI_ENDPOINT='$STAGING_AZURE_OPENAI_ENDPOINT'
+        export AZURE_OPENAI_API_KEY='$STAGING_AZURE_OPENAI_API_KEY'
+        export AZURE_OPENAI_CHAT_DEPLOYMENT='$AZURE_OPENAI_CHAT_DEPLOYMENT'
+        export AZURE_OPENAI_EMBEDDING_DEPLOYMENT='$AZURE_OPENAI_EMBEDDING_DEPLOYMENT'
+        export NEXUS_JWT_SECRET='$STAGING_JWT_SECRET'
+        export NEXUS_DATA_DIR='$STAGING_DATA_DIR'
+        export NEXUS_SSL_CERT_DIR='$STAGING_SSL_CERT_DIR'
+        docker login -u '$CI_REGISTRY_USER' -p '$CI_REGISTRY_PASSWORD' '$CI_REGISTRY'
+        cd /opt/nexus
+        docker stack deploy -c docker-compose.prod.yml nexus-staging --with-registry-auth
+        docker system prune -f --filter 'until=24h'
+      "
+  environment:
+    name: staging
+    url: https://nexus-staging.sei.internal
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+# ---------------------------------------------------------------------------
+# DEPLOY PRODUCTION STAGE
+# ---------------------------------------------------------------------------
+
+deploy:production:
+  stage: deploy-production
+  image: alpine:3.19
+  needs:
+    - deploy:staging
+  before_script:
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$PROD_SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - ssh-keyscan -H "$PROD_HOST" >> ~/.ssh/known_hosts
+  script:
+    - |
+      ssh "$PROD_USER@$PROD_HOST" "
+        export CI_REGISTRY_IMAGE='$CI_REGISTRY_IMAGE'
+        export IMAGE_TAG='$CI_COMMIT_SHA'
+        export NEXUS_DB_USERNAME='$PROD_DB_USERNAME'
+        export NEXUS_DB_PASSWORD='$PROD_DB_PASSWORD'
+        export AZURE_OPENAI_ENDPOINT='$PROD_AZURE_OPENAI_ENDPOINT'
+        export AZURE_OPENAI_API_KEY='$PROD_AZURE_OPENAI_API_KEY'
+        export AZURE_OPENAI_CHAT_DEPLOYMENT='$AZURE_OPENAI_CHAT_DEPLOYMENT'
+        export AZURE_OPENAI_EMBEDDING_DEPLOYMENT='$AZURE_OPENAI_EMBEDDING_DEPLOYMENT'
+        export NEXUS_JWT_SECRET='$PROD_JWT_SECRET'
+        export NEXUS_DATA_DIR='$PROD_DATA_DIR'
+        export NEXUS_SSL_CERT_DIR='$PROD_SSL_CERT_DIR'
+        docker login -u '$CI_REGISTRY_USER' -p '$CI_REGISTRY_PASSWORD' '$CI_REGISTRY'
+        cd /opt/nexus
+        docker stack deploy -c docker-compose.prod.yml nexus-prod --with-registry-auth
+        docker system prune -f --filter 'until=24h'
+      "
+  environment:
+    name: production
+    url: https://nexus.sei.internal
+  when: manual
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
+    - if: '$CI_COMMIT_BRANCH =~ /^release\/.*/'
+      when: manual

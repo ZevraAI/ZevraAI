@@ -1,0 +1,169 @@
+version: '3.8'
+
+# =============================================================================
+# SEI Nexus - Production Docker Compose
+# All secrets must be provided via environment variables or Docker secrets.
+# No default values are set for sensitive configuration.
+# Deploy with: docker stack deploy -c docker-compose.prod.yml nexus
+# =============================================================================
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: nexus_db
+      POSTGRES_USER: ${NEXUS_DB_USERNAME}
+      POSTGRES_PASSWORD: ${NEXUS_DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NEXUS_DB_USERNAME} -d nexus_db"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - nexus-internal
+    restart: always
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+        window: 120s
+      placement:
+        constraints:
+          - node.role == manager
+
+  backend:
+    image: ${CI_REGISTRY_IMAGE}/sei-nexus-ai:${IMAGE_TAG:-latest}
+    environment:
+      NEXUS_DB_URL: jdbc:postgresql://postgres:5432/nexus_db
+      NEXUS_DB_USERNAME: ${NEXUS_DB_USERNAME}
+      NEXUS_DB_PASSWORD: ${NEXUS_DB_PASSWORD}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY}
+      AZURE_OPENAI_CHAT_DEPLOYMENT: ${AZURE_OPENAI_CHAT_DEPLOYMENT}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT}
+      NEXUS_STORAGE_PATH: /data/documents
+      NEXUS_JWT_SECRET: ${NEXUS_JWT_SECRET}
+      SPRING_PROFILES_ACTIVE: prod
+      JAVA_OPTS: >-
+        -XX:+UseContainerSupport
+        -XX:MaxRAMPercentage=75.0
+        -XX:+UseG1GC
+        -XX:+HeapDumpOnOutOfMemoryError
+        -XX:HeapDumpPath=/tmp/heapdump.hprof
+    volumes:
+      - document_storage:/data/documents
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - nexus-internal
+      - nexus-external
+    restart: always
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 3G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+      restart_policy:
+        condition: on-failure
+        delay: 15s
+        max_attempts: 5
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 30s
+        failure_action: rollback
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8090/api/v1/actuator/health | grep -q UP || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  frontend:
+    image: ${CI_REGISTRY_IMAGE}/sei-nexus-ui:${IMAGE_TAG:-latest}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ssl_certs:/etc/nginx/certs:ro
+    depends_on:
+      - backend
+    networks:
+      - nexus-external
+    restart: always
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+        window: 60s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:80/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${NEXUS_DATA_DIR}/postgres
+  document_storage:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${NEXUS_DATA_DIR}/documents
+  ssl_certs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${NEXUS_SSL_CERT_DIR}
+
+networks:
+  nexus-internal:
+    driver: overlay
+    internal: true
+    attachable: false
+  nexus-external:
+    driver: overlay
+    attachable: false
