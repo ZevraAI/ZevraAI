@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: zevra-api
+    runtime: docker
+    plan: free
+    rootDir: sei-nexus-ai
+    dockerfilePath: ./sei-nexus-ai/Dockerfile
+    healthCheckPath: /api/v1/actuator/health
+
+    envVars:
+      - key: NEXUS_DB_URL
+        value: jdbc:postgresql://aws-1-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require
+
+      - key: NEXUS_DB_USERNAME
+        value: postgres.qlmumipyikwifbcvzsfx
+
+      - key: NEXUS_DB_PASSWORD
+        sync: false
+
+      - key: OPENAI_API_KEY
+        sync: false
+
+      - key: OPENAI_CHAT_MODEL
+        value: gpt-4o
+
+      - key: OPENAI_EMBEDDING_MODEL
+        value: text-embedding-ada-002
+
+      - key: NEXUS_JWT_SECRET
+        generateValue: true
+
+      - key: NEXUS_CORS_ALLOWED_ORIGINS
+        value: "*"
+
+      - key: NEXUS_STORAGE_PATH
+        value: /tmp/zevra/documents
