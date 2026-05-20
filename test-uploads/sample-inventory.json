@@ -1,0 +1,24 @@
+{
+  "snapshot_date": "2026-05-19",
+  "warehouse": "Central Distribution Hub",
+  "currency": "USD",
+  "items": [
+    { "sku": "EQ-A300",  "name": "Industrial Pump A300",    "category": "Equipment",    "on_hand": 5,   "reorder_point": 3,  "unit_cost": 4200.00, "location": "Rack A-12" },
+    { "sku": "EQ-B20",   "name": "Conveyor Belt B20",       "category": "Equipment",    "on_hand": 2,   "reorder_point": 2,  "unit_cost": 11500.00,"location": "Dock B-04" },
+    { "sku": "EQ-AC400", "name": "Compressor AC400",        "category": "Equipment",    "on_hand": 0,   "reorder_point": 1,  "unit_cost": 8800.00, "location": "Dock B-06" },
+    { "sku": "EL-CP5",   "name": "Electrical Panel CP5",    "category": "Electrical",   "on_hand": 8,   "reorder_point": 5,  "unit_cost": 2050.00, "location": "Rack C-03" },
+    { "sku": "EL-GEN50", "name": "Generator 50KVA",         "category": "Electrical",   "on_hand": 3,   "reorder_point": 2,  "unit_cost": 17000.00,"location": "Dock B-01" },
+    { "sku": "EL-CAB100","name": "Electrical Cable 100m",   "category": "Electrical",   "on_hand": 42,  "reorder_point": 20, "unit_cost": 168.00,  "location": "Rack C-11" },
+    { "sku": "RM-SP6",   "name": "Steel Pipes 6m",          "category": "Raw Material", "on_hand": 120, "reorder_point": 50, "unit_cost": 80.00,   "location": "Yard Y-02" },
+    { "sku": "SF-HLM50", "name": "Safety Helmets (Pack 50)","category": "Safety",       "on_hand": 4,   "reorder_point": 10, "unit_cost": 295.00,  "location": "Rack D-01" },
+    { "sku": "SF-FEX9",  "name": "Fire Extinguisher 9L",    "category": "Safety",       "on_hand": 15,  "reorder_point": 20, "unit_cost": 105.00,  "location": "Rack D-05" },
+    { "sku": "SF-LAD6",  "name": "Ladder Aluminium 6m",     "category": "Safety",       "on_hand": 9,   "reorder_point": 5,  "unit_cost": 255.00,  "location": "Rack D-08" },
+    { "sku": "CN-LUB200","name": "Lubricant Drum 200L",     "category": "Consumables",  "on_hand": 22,  "reorder_point": 15, "unit_cost": 195.00,  "location": "Rack E-02" },
+    { "sku": "CN-PNT20", "name": "Paint Industrial 20L",    "category": "Consumables",  "on_hand": 35,  "reorder_point": 25, "unit_cost": 88.00,   "location": "Rack E-07" },
+    { "sku": "CP-HH10",  "name": "Hydraulic Hose 10m",      "category": "Components",   "on_hand": 60,  "reorder_point": 30, "unit_cost": 70.00,   "location": "Rack F-03" },
+    { "sku": "CP-PSK",   "name": "Pump Seal Kit",           "category": "Components",   "on_hand": 18,  "reorder_point": 10, "unit_cost": 315.00,  "location": "Rack F-09" },
+    { "sku": "TL-DM",    "name": "Drill Machine HD",         "category": "Tools",        "on_hand": 7,   "reorder_point": 5,  "unit_cost": 610.00,  "location": "Rack G-02" },
+    { "sku": "TL-HJ10",  "name": "Hydraulic Jack 10T",      "category": "Tools",        "on_hand": 6,   "reorder_point": 3,  "unit_cost": 1020.00, "location": "Rack G-05" },
+    { "sku": "HW-BFS",   "name": "Bolts & Fasteners Set",   "category": "Hardware",     "on_hand": 350, "reorder_point": 100,"unit_cost": 11.50,   "location": "Rack H-01" }
+  ]
+}

@@ -34,6 +34,16 @@ public class ConnectionRepository {
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 
+    /** Looks up by key first; falls back to case-insensitive name match. */
+    public Optional<NexusConnection> findByKeyOrName(String value) {
+        Optional<NexusConnection> byKey = findByKey(value);
+        if (byKey.isPresent()) return byKey;
+        List<NexusConnection> rows = jdbc.query(
+                "SELECT * FROM nexus_connection WHERE LOWER(name) = LOWER(?) AND status = 'ACTIVE' LIMIT 1",
+                rowMapper(), value);
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
     /**
      * Upserts a connection record keyed on connection_key.
      */
@@ -72,11 +82,40 @@ public class ConnectionRepository {
     }
 
     public void archive(String connectionKey) {
-        jdbc.update("""
-                UPDATE nexus_connection
-                   SET status = 'ARCHIVED', updated_at = NOW()
-                 WHERE connection_key = ?
-                """, connectionKey);
+        jdbc.update("DELETE FROM nexus_connection WHERE connection_key = ?", connectionKey);
+    }
+
+    /**
+     * Returns a list of human-readable dependency names that reference this connection.
+     * Checks nexus_data_object (exact FK) and nexus_agent (comma-separated text field).
+     * Non-empty result means the connection must not be deleted.
+     */
+    public List<String> findDependents(String connectionKey) {
+        List<String> dependents = new java.util.ArrayList<>();
+
+        // Data objects that directly reference this connection
+        List<String> objectNames = jdbc.queryForList(
+                "SELECT COALESCE(business_name, table_name) FROM nexus_data_object " +
+                "WHERE connection_key = ? LIMIT 5",
+                String.class, connectionKey);
+        if (!objectNames.isEmpty()) {
+            dependents.add(objectNames.size() + " data object(s): " + String.join(", ", objectNames));
+        }
+
+        // Agents whose connection_keys text field contains this key
+        List<String> agentNames = jdbc.queryForList(
+                "SELECT name FROM nexus_agent WHERE status != 'ARCHIVED' " +
+                "AND (connection_keys = ? OR connection_keys LIKE ? OR connection_keys LIKE ? OR connection_keys LIKE ?) LIMIT 5",
+                String.class,
+                connectionKey,
+                connectionKey + ",%",
+                "%," + connectionKey,
+                "%," + connectionKey + ",%");
+        if (!agentNames.isEmpty()) {
+            dependents.add(agentNames.size() + " agent(s): " + String.join(", ", agentNames));
+        }
+
+        return dependents;
     }
 
     public void updateTestResult(String connectionKey, String status, String message) {

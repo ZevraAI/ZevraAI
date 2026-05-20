@@ -1,0 +1,51 @@
+Q1 2026 Operations Summary Report
+===================================
+Prepared by: Operations Team
+Period: January 1 – March 31, 2026
+
+EXECUTIVE SUMMARY
+-----------------
+Total orders processed: 847
+Revenue: $2,340,800
+Average order value: $2,764
+On-time delivery rate: 91.4%
+Orders cancelled: 23 (2.7%)
+
+TOP PERFORMING REGIONS
+----------------------
+1. North Region    — $820,500 revenue, 312 orders
+2. South Region    — $710,200 revenue, 278 orders
+3. West Region     — $490,100 revenue, 147 orders
+4. East Region     — $320,000 revenue, 110 orders
+
+TOP PRODUCT CATEGORIES
+----------------------
+Category          Orders    Revenue
+Equipment           180    $945,000
+Electrical          210    $480,000
+Raw Material         95    $390,000
+Safety              160    $260,000
+Consumables         135    $155,800
+Tools                67    $110,000
+
+SUPPLIER PERFORMANCE
+--------------------
+Supplier              On-Time %    Defect Rate
+Acme Corp                94%          1.2%
+Summit Industries        92%          0.8%
+Blue Ridge Ltd           89%          2.1%
+Pinnacle Works           96%          0.5%
+Horizon Supplies         87%          3.0%
+Green Valley Co          91%          1.6%
+
+OUTSTANDING ISSUES
+------------------
+- 14 orders from Horizon Supplies delayed due to port congestion (East region)
+- 3 Generator units (ORD-1010 batch) flagged for quality re-inspection
+- Safety gear reorder point reached — recommend placing PO by April 10
+
+RECOMMENDATIONS
+---------------
+1. Increase safety gear buffer stock to 90-day supply given lead time variability.
+2. Review Horizon Supplies SLA — third consecutive quarter below 90% on-time.
+3. Negotiate volume discount with Pinnacle Works (fastest growing supplier).

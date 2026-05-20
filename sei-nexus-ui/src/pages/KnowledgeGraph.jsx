@@ -1,598 +1,1055 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import ForceGraph2D from 'react-force-graph-2d';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
+import { navigate } from '../App.jsx';
+import { Spinner } from '../components/Card.jsx';
 import {
-  Search, RefreshCw, Maximize2, X, Database,
-  ArrowRight, ChevronRight, Layers,
+  ArrowRight, ChevronRight, Clipboard, ClipboardCheck,
+  MessageSquare, RefreshCw, Search, Shuffle, X, Zap,
 } from 'lucide-react';
 
-// ── design tokens ─────────────────────────────────────────────────────────────
+// ── Entity type config ────────────────────────────────────────────────────────
 
-const CANVAS_BG = '#0E1117';
-
-const NODE_STYLES = {
-  ENTITY:      { color: '#10B981', glow: '#10B98150', radius: 14, label: 'Entity' },
-  TRANSACTION: { color: '#3B82F6', glow: '#3B82F650', radius: 13, label: 'Transaction' },
-  REFERENCE:   { color: '#8B5CF6', glow: '#8B5CF650', radius: 12, label: 'Reference' },
-  METRIC:      { color: '#F59E0B', glow: '#F59E0B50', radius: 12, label: 'Metric' },
-  EVENT:       { color: '#EC4899', glow: '#EC489950', radius: 11, label: 'Event' },
-  DETAIL:      { color: '#06B6D4', glow: '#06B6D450', radius: 11, label: 'Detail' },
-  DEFAULT:     { color: '#6B7280', glow: '#6B728050', radius: 11, label: 'Node' },
+const TYPE_CONFIG = {
+  ENTITY:      { color: '#10B981', bg: '#D1FAE5', label: 'Entity',      order: 1 },
+  TRANSACTION: { color: '#3B82F6', bg: '#DBEAFE', label: 'Transaction', order: 2 },
+  REFERENCE:   { color: '#8B5CF6', bg: '#EDE9FE', label: 'Reference',   order: 3 },
+  METRIC:      { color: '#F59E0B', bg: '#FEF9C3', label: 'Metric',      order: 4 },
+  EVENT:       { color: '#EC4899', bg: '#FCE7F3', label: 'Event',       order: 5 },
+  DETAIL:      { color: '#06B6D4', bg: '#CFFAFE', label: 'Detail',      order: 6 },
 };
 
-function nodeStyle(nodeType) {
-  return NODE_STYLES[nodeType] || NODE_STYLES.DEFAULT;
-}
+const FLAG_STYLES = {
+  identifier: 'bg-[#DBEAFE] text-[#1D4ED8]',
+  filterable: 'bg-[#DCFCE7] text-[#15803D]',
+  status:     'bg-[#FEF9C3] text-[#A16207]',
+  sensitive:  'bg-[#FEE2E2] text-[#DC2626]',
+  error:      'bg-[#FEE2E2] text-[#DC2626]',
+};
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+function typeConf(t) { return TYPE_CONFIG[t] ?? { color: '#6B7280', bg: '#F3F4F6', label: t || 'Node', order: 99 }; }
+function safeArr(v)  { return Array.isArray(v) ? v : []; }
+function fmtKey(k)   { return k?.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) ?? ''; }
 
-function safeArray(v) { return Array.isArray(v) ? v : []; }
-function truncate(s, n) { return s && s.length > n ? s.slice(0, n) + '…' : (s || ''); }
+// ── useCopyToClipboard ────────────────────────────────────────────────────────
 
-function normaliseNode(n) {
-  return {
-    id:                 n.id                ?? n.entity_key,
-    label:              n.label             ?? n.entity_name,
-    nodeType:           n.node_type         ?? n.nodeType         ?? 'DEFAULT',
-    color:              n.color             ?? null,
-    groupLabel:         n.group_label       ?? n.groupLabel,
-    domainKey:          n.domain_key        ?? n.domainKey,
-    description:        n.description,
-    primaryObjectKey:   n.primary_object_key?? n.primaryObjectKey,
-    operationalMeaning: n.operational_meaning ?? n.operationalMeaning,
-    investigationHints: n.investigation_hints ?? n.investigationHints,
-    status:             n.status,
+function useCopy() {
+  const [copied, setCopied] = useState(false);
+  const copy = async (text) => {
+    try { await navigator.clipboard.writeText(text); } catch {}
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
+  return [copied, copy];
 }
 
-function normaliseEdge(e) {
-  return {
-    id:               e.id               ?? e.relationship_key ?? `${e.source ?? e.source_entity_key}-${e.target ?? e.target_entity_key}`,
-    source:           e.source           ?? e.source_entity_key,
-    target:           e.target           ?? e.target_entity_key,
-    relationshipType: e.relationship_type?? e.relationshipType,
-    sourceColumn:     e.source_column    ?? e.sourceColumn,
-    targetColumn:     e.target_column    ?? e.targetColumn,
-    joinGuidance:     e.join_guidance    ?? e.joinGuidance,
-    cardinality:      e.cardinality,
-    bidirectional:    e.bidirectional    ?? false,
-    edgeColor:        e.edge_color       ?? e.edgeColor ?? '#374151',
-  };
-}
+// ── Entity sidebar list ───────────────────────────────────────────────────────
 
-// ── detail panel ──────────────────────────────────────────────────────────────
+function EntityList({ entities, selected, onSelect, search, onSearchChange }) {
+  const grouped = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const filtered = q
+      ? entities.filter(e => e.entity_name?.toLowerCase().includes(q) ||
+                             e.entity_key?.toLowerCase().includes(q) ||
+                             e.description?.toLowerCase().includes(q))
+      : entities;
 
-function DetailPanel({ node, edges, onClose, onExpand }) {
-  if (!node) return null;
-  const style   = nodeStyle(node.nodeType);
-  const outbound = edges.filter(e => (typeof e.source === 'object' ? e.source.id : e.source) === node.id);
-  const inbound  = edges.filter(e => (typeof e.target === 'object' ? e.target.id : e.target) === node.id);
-  const tableName = node.primaryObjectKey
-    ? node.primaryObjectKey.split('-').slice(3).join('_') || node.primaryObjectKey
-    : null;
+    const groups = {};
+    filtered.forEach(e => {
+      const t = e.node_type ?? e.nodeType ?? 'ENTITY';
+      if (!groups[t]) groups[t] = [];
+      groups[t].push(e);
+    });
+    return Object.entries(groups)
+      .sort(([a], [b]) => (typeConf(a).order ?? 99) - (typeConf(b).order ?? 99));
+  }, [entities, search]);
 
   return (
-    <div className="absolute top-0 right-0 h-full w-[340px] flex flex-col bg-[#13181F] border-l border-white/8 z-20 overflow-hidden">
-      {/* Header */}
-      <div className="shrink-0 px-5 py-4 border-b border-white/8" style={{ borderTopColor: style.color, borderTopWidth: 2 }}>
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2 mb-1">
-              <span
-                className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold"
-                style={{ backgroundColor: style.color + '25', color: style.color }}
-              >
-                {node.nodeType}
-              </span>
-              {node.groupLabel && (
-                <span className="text-xs text-white/35">{node.groupLabel}</span>
-              )}
-            </div>
-            <h3 className="text-[17px] font-bold text-white leading-tight">{node.label}</h3>
-          </div>
-          <div className="flex items-center gap-1 shrink-0">
-            <button
-              onClick={() => onExpand(node.id)}
-              title="Expand 2-hop neighbours"
-              className="w-7 h-7 rounded-md flex items-center justify-center text-white/50 hover:text-white hover:bg-white/10 transition-colors"
-            >
-              <Maximize2 size={14} />
+    <div className="w-[260px] flex-shrink-0 flex flex-col bg-white/80 backdrop-blur-sm
+                    border-r border-gray-200/70 overflow-hidden">
+
+      {/* Search */}
+      <div className="px-3 py-3 border-b border-gray-200/70 flex-shrink-0">
+        <div className="relative">
+          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input
+            value={search}
+            onChange={e => onSearchChange(e.target.value)}
+            placeholder="Search entities…"
+            className="w-full h-8 rounded-[8px] bg-gray-100/80 pl-8 pr-8 text-[12.5px]
+                       text-[#111827] focus:outline-none focus:ring-2 focus:ring-emerald-400/30
+                       focus:bg-white transition-all placeholder:text-gray-300"
+          />
+          {search && (
+            <button onClick={() => onSearchChange('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+              <X size={12} />
             </button>
-            <button
-              onClick={onClose}
-              className="w-7 h-7 rounded-md flex items-center justify-center text-white/50 hover:text-white hover:bg-white/10 transition-colors"
-            >
-              <X size={14} />
-            </button>
-          </div>
+          )}
         </div>
-
-        {tableName && (
-          <div className="mt-2.5 flex items-center gap-1.5 text-xs text-white/40 font-mono">
-            <Database size={11} />
-            {tableName}
-          </div>
-        )}
       </div>
 
-      {/* Scrollable body */}
-      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5 scrollbar-thin scrollbar-thumb-white/10">
-
-        {/* Description */}
-        {node.description && (
-          <p className="text-sm text-white/60 leading-relaxed">{node.description}</p>
+      {/* Grouped entity list */}
+      <div className="overflow-y-auto flex-1 py-2">
+        {grouped.length === 0 && (
+          <p className="px-4 py-6 text-[12px] text-gray-400 text-center">No entities found</p>
         )}
-
-        {/* Operational meaning */}
-        {node.operationalMeaning && (
-          <div>
-            <p className="text-xs font-semibold text-white/35 uppercase tracking-wider mb-2">Operational meaning</p>
-            <p className="text-sm text-white/70 leading-relaxed">{node.operationalMeaning}</p>
-          </div>
-        )}
-
-        {/* Investigation hint */}
-        {node.investigationHints && (
-          <div className="rounded-lg border border-amber-500/20 bg-amber-500/8 px-4 py-3">
-            <p className="text-xs font-semibold text-amber-400 mb-1.5">💡 Investigation hint</p>
-            <p className="text-xs text-amber-300/80 leading-relaxed font-mono break-words">
-              {node.investigationHints}
-            </p>
-          </div>
-        )}
-
-        {/* Relationships */}
-        {(outbound.length > 0 || inbound.length > 0) && (
-          <div>
-            <p className="text-xs font-semibold text-white/35 uppercase tracking-wider mb-3">Relationships</p>
-            <div className="space-y-2">
-              {outbound.map((e, i) => {
-                const tid = typeof e.target === 'object' ? e.target.id : e.target;
-                const tStyle = nodeStyle(null);
+        {grouped.map(([type, items]) => {
+          const conf = typeConf(type);
+          return (
+            <div key={type} className="mb-1">
+              <div className="flex items-center gap-2 px-4 py-1.5">
+                <div className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                     style={{ background: conf.color }} />
+                <span className="text-[10px] font-semibold uppercase tracking-widest"
+                      style={{ color: conf.color }}>
+                  {conf.label} ({items.length})
+                </span>
+              </div>
+              {items.map(e => {
+                const key  = e.entity_key;
+                const name = e.entity_name ?? key;
+                const active = selected?.entity_key === key;
                 return (
-                  <div key={`out-${i}`} className="flex items-center gap-2.5 text-xs">
-                    <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: e.edgeColor || '#374151' }} />
-                    <span className="text-white/80 font-medium truncate">{tid}</span>
-                    <ArrowRight size={10} className="text-white/25 shrink-0" />
-                    <span className="text-white/40 shrink-0">{e.relationshipType}</span>
-                    {e.cardinality && <span className="ml-auto text-white/25 shrink-0">{e.cardinality}</span>}
-                  </div>
-                );
-              })}
-              {inbound.map((e, i) => {
-                const sid = typeof e.source === 'object' ? e.source.id : e.source;
-                return (
-                  <div key={`in-${i}`} className="flex items-center gap-2.5 text-xs opacity-50">
-                    <div className="w-1.5 h-1.5 rounded-full shrink-0 opacity-50" style={{ backgroundColor: e.edgeColor || '#374151' }} />
-                    <span className="text-white/60 truncate">← {sid}</span>
-                    <span className="text-white/30 shrink-0">{e.relationshipType}</span>
-                  </div>
+                  <button key={key} onClick={() => onSelect(e)}
+                    className={`w-full text-left px-4 py-2 transition-colors flex items-center gap-2.5 group
+                      ${active
+                        ? 'bg-emerald-50/80 border-l-2 border-emerald-500'
+                        : 'hover:bg-gray-50/60 border-l-2 border-transparent'}`}>
+                    <span className={`text-[12.5px] font-medium truncate
+                      ${active ? 'text-emerald-700' : 'text-[#374151] group-hover:text-[#111827]'}`}>
+                      {name}
+                    </span>
+                    <ChevronRight size={11}
+                      className={`ml-auto flex-shrink-0 transition-opacity
+                        ${active ? 'text-emerald-500 opacity-100' : 'text-gray-300 opacity-0 group-hover:opacity-100'}`} />
+                  </button>
                 );
               })}
             </div>
-          </div>
-        )}
-
-        {/* JOIN guidance */}
-        {outbound.some(e => e.joinGuidance) && (
-          <div>
-            <p className="text-xs font-semibold text-white/35 uppercase tracking-wider mb-2">JOIN guidance</p>
-            <div className="space-y-2">
-              {outbound.filter(e => e.joinGuidance).map((e, i) => {
-                const tid = typeof e.target === 'object' ? e.target.id : e.target;
-                return (
-                  <div key={i} className="rounded-lg bg-[#0E1117] border border-white/8 overflow-hidden">
-                    <div className="px-3 py-1.5 border-b border-white/8 text-2xs text-white/30 font-medium">
-                      → {tid}
-                    </div>
-                    <pre className="px-3 py-2 text-xs text-emerald-400 font-mono leading-relaxed overflow-x-auto">
-                      {e.joinGuidance}
-                    </pre>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Footer */}
-      <div className="shrink-0 px-5 py-3 border-t border-white/8">
-        <button
-          onClick={() => onExpand(node.id)}
-          className="w-full h-9 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-all"
-          style={{ backgroundColor: style.color + '20', color: style.color }}
-          onMouseEnter={e => e.currentTarget.style.backgroundColor = style.color + '30'}
-          onMouseLeave={e => e.currentTarget.style.backgroundColor = style.color + '20'}
-        >
-          <Maximize2 size={14} />
-          Expand neighbours
-        </button>
+          );
+        })}
       </div>
     </div>
   );
 }
 
-// ── main ──────────────────────────────────────────────────────────────────────
+// ── Column flags ──────────────────────────────────────────────────────────────
+
+function ColFlags({ col }) {
+  const flags = [];
+  if (col.is_identifier) flags.push('identifier');
+  if (col.is_filterable) flags.push('filterable');
+  if (col.is_status)     flags.push('status');
+  if (col.is_sensitive)  flags.push('sensitive');
+  if (col.is_error)      flags.push('error');
+  return (
+    <div className="flex flex-wrap gap-1">
+      {flags.map(f => (
+        <span key={f} className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${FLAG_STYLES[f] ?? ''}`}>{f}</span>
+      ))}
+    </div>
+  );
+}
+
+// ── Entity detail panel ───────────────────────────────────────────────────────
+
+function EntityDetail({ entity, allEdges, entityIndex }) {
+  const [columns,  setColumns]  = useState([]);
+  const [vocab,    setVocab]    = useState([]);
+  const [rels,     setRels]     = useState([]);
+  const [loading,  setLoading]  = useState(false);
+  const [tab,      setTab]      = useState('overview');
+  const [copied,   copy]        = useCopy();
+
+  const domainKey        = entity.domain_key ?? entity.domainKey ?? '';
+  const primaryObjectKey = entity.primary_object_key ?? entity.primaryObjectKey;
+  const conf             = typeConf(entity.node_type ?? entity.nodeType);
+
+  useEffect(() => {
+    if (!entity) return;
+    setTab('overview');
+    setColumns([]); setVocab([]); setRels([]);
+    setLoading(true);
+    Promise.all([
+      primaryObjectKey
+        ? api.enterprise.columns(primaryObjectKey).catch(() => [])
+        : Promise.resolve([]),
+      domainKey
+        ? api.semantic.vocabulary(domainKey).catch(() => [])
+        : Promise.resolve([]),
+      api.semantic.relationships(entity.entity_key).catch(() => []),
+    ]).then(([cols, voc, r]) => {
+      setColumns(safeArr(cols));
+      setVocab(safeArr(voc).filter(v =>
+        (v.entity_key ?? v.entityKey) === entity.entity_key));
+      setRels(safeArr(r));
+    }).finally(() => setLoading(false));
+  }, [entity?.entity_key]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const askZevra = () => {
+    const q = `Tell me about the ${entity.entity_name} entity — what are the key metrics, current status distribution, and any anomalies I should investigate?`;
+    localStorage.setItem('zevra_chat_prefill', q);
+    navigate('/chat');
+  };
+
+  const edgesForEntity = useMemo(() =>
+    allEdges.filter(e => {
+      const src = typeof e.source === 'object' ? e.source?.id : e.source;
+      const tgt = typeof e.target === 'object' ? e.target?.id : e.target;
+      return src === entity.entity_key || tgt === entity.entity_key;
+    }),
+  [allEdges, entity.entity_key]);
+
+  const outbound = edgesForEntity.filter(e => {
+    const src = typeof e.source === 'object' ? e.source?.id : e.source;
+    return src === entity.entity_key;
+  });
+
+  const inbound = edgesForEntity.filter(e => {
+    const tgt = typeof e.target === 'object' ? e.target?.id : e.target;
+    return tgt === entity.entity_key;
+  });
+
+  const TABS = [
+    ['overview',  'Overview'],
+    ['columns',   `Columns (${columns.length})`],
+    ['vocab',     `Vocabulary (${vocab.length})`],
+    ['relations', `Relationships (${outbound.length + inbound.length})`],
+  ];
+
+  return (
+    <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+
+      {/* Entity header */}
+      <div className="flex-shrink-0 px-7 pt-6 pb-0 border-b border-gray-200/70 bg-white/40">
+        <div className="flex items-start justify-between gap-4 mb-4">
+          <div>
+            <div className="flex items-center gap-2.5 mb-2">
+              <span className="px-2.5 py-1 rounded-[7px] text-[11.5px] font-semibold"
+                    style={{ background: conf.bg, color: conf.color }}>
+                {conf.label}
+              </span>
+              {domainKey && (
+                <span className="text-[12px] text-gray-400 font-medium">{domainKey}</span>
+              )}
+            </div>
+            <h1 className="text-[22px] font-bold text-[#111827] tracking-[-0.025em]">
+              {entity.entity_name}
+            </h1>
+            {primaryObjectKey && (
+              <p className="text-[12.5px] text-gray-400 font-mono mt-1">{primaryObjectKey}</p>
+            )}
+          </div>
+
+          {/* Ask Zevra CTA */}
+          <button onClick={askZevra}
+            className="flex-shrink-0 flex items-center gap-2 px-4 py-2 rounded-[9px] text-[13px]
+                       font-semibold text-white shadow-sm transition-all hover:shadow-md hover:opacity-90"
+            style={{ background: `linear-gradient(135deg, ${conf.color}, ${conf.color}CC)` }}>
+            <MessageSquare size={14} />
+            Ask Zevra
+          </button>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex gap-0">
+          {TABS.map(([k, l]) => (
+            <button key={k} onClick={() => setTab(k)}
+              className={`px-4 py-2.5 text-[13px] font-medium border-b-2 -mb-px transition-colors
+                ${tab === k
+                  ? 'border-emerald-500 text-emerald-600'
+                  : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
+              {l}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Tab content */}
+      <div className="flex-1 overflow-y-auto">
+        {loading ? (
+          <div className="flex justify-center py-16"><Spinner /></div>
+        ) : (
+          <div className="px-7 py-6">
+
+            {/* ── Overview ── */}
+            {tab === 'overview' && (
+              <div className="space-y-5 max-w-3xl">
+                {entity.description ? (
+                  <div className="bg-white/80 backdrop-blur-sm border border-gray-200/70
+                                  rounded-xl p-5">
+                    <p className="text-[10.5px] font-semibold text-gray-400 uppercase tracking-widest mb-2">
+                      Description
+                    </p>
+                    <p className="text-[14px] text-[#374151] leading-relaxed">{entity.description}</p>
+                  </div>
+                ) : null}
+
+                {entity.operational_meaning ?? entity.operationalMeaning ? (
+                  <div className="bg-white/80 backdrop-blur-sm border border-gray-200/70
+                                  rounded-xl p-5">
+                    <p className="text-[10.5px] font-semibold text-gray-400 uppercase tracking-widest mb-2">
+                      Operational context
+                    </p>
+                    <p className="text-[13.5px] text-[#374151] leading-relaxed">
+                      {entity.operational_meaning ?? entity.operationalMeaning}
+                    </p>
+                  </div>
+                ) : null}
+
+                {(entity.investigation_hints ?? entity.investigationHints) ? (
+                  <div className="bg-amber-50/80 border border-amber-200/70 rounded-xl p-5">
+                    <p className="text-[10.5px] font-semibold text-amber-600 uppercase tracking-widest mb-2 flex items-center gap-1.5">
+                      <Zap size={11} /> Investigation hint
+                    </p>
+                    <code className="text-[12.5px] text-amber-700 font-mono leading-relaxed block whitespace-pre-wrap">
+                      {entity.investigation_hints ?? entity.investigationHints}
+                    </code>
+                  </div>
+                ) : null}
+
+                {!entity.description && !(entity.operational_meaning ?? entity.operationalMeaning) && (
+                  <div className="text-center py-10 text-[13px] text-gray-400">
+                    No description yet.{' '}
+                    <button onClick={() => navigate('/semantic')}
+                      className="text-emerald-600 hover:underline">
+                      Add one in the Semantic Layer →
+                    </button>
+                  </div>
+                )}
+
+                {/* Quick stats */}
+                <div className="grid grid-cols-4 gap-3">
+                  {[
+                    { label: 'Columns',      value: columns.length },
+                    { label: 'Vocab terms',  value: vocab.length   },
+                    { label: 'Connects to',  value: outbound.length },
+                    { label: 'Referenced by',value: inbound.length  },
+                  ].map(({ label, value }) => (
+                    <div key={label}
+                      className="bg-white/80 backdrop-blur-sm border border-gray-200/70
+                                 rounded-xl p-4 text-center">
+                      <div className="text-[24px] font-bold text-[#111827]">{value}</div>
+                      <div className="text-[11.5px] text-gray-400 mt-0.5">{label}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ── Columns ── */}
+            {tab === 'columns' && (
+              columns.length === 0 ? (
+                <div className="text-center py-12 text-[13px] text-gray-400">
+                  No column data. Run a scan from the Enterprise Map page.
+                </div>
+              ) : (
+                <div className="bg-white/80 backdrop-blur-sm border border-gray-200/70
+                                rounded-xl overflow-hidden max-w-4xl">
+                  <table className="w-full border-collapse text-[13px]">
+                    <thead>
+                      <tr className="bg-gray-50/80 border-b border-gray-200/70">
+                        <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Column</th>
+                        <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Type</th>
+                        <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Flags</th>
+                        <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Business meaning</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {columns.map((col, i) => (
+                        <tr key={col.column_key ?? col.columnKey ?? i}
+                          className="border-b border-gray-100/80 hover:bg-gray-50/40 transition-colors">
+                          <td className="px-4 py-3 font-mono text-[12.5px] text-[#374151] font-medium">
+                            {col.column_name ?? col.columnName}
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold
+                                             bg-gray-100 text-gray-600">
+                              {col.data_type ?? col.dataType ?? '—'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3"><ColFlags col={col} /></td>
+                          <td className="px-4 py-3 text-[12.5px] text-gray-500">
+                            {col.business_meaning ?? col.businessMeaning ?? '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            )}
+
+            {/* ── Vocabulary ── */}
+            {tab === 'vocab' && (
+              vocab.length === 0 ? (
+                <div className="text-center py-12 text-[13px] text-gray-400">
+                  No vocabulary terms for this entity.{' '}
+                  <button onClick={() => navigate('/semantic')}
+                    className="text-emerald-600 hover:underline">
+                    Add terms in the Semantic Layer →
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3 max-w-3xl">
+                  {vocab.map(v => (
+                    <div key={v.term_key ?? v.termKey}
+                      className="bg-white/80 backdrop-blur-sm border border-gray-200/70
+                                 rounded-xl p-4 flex items-start gap-4">
+                      <div className="flex-1 min-w-0">
+                        <div className="font-semibold text-[13.5px] text-[#111827] mb-1">
+                          {v.term}
+                        </div>
+                        <p className="text-[13px] text-gray-500">{v.definition}</p>
+                      </div>
+                      {(v.sql_equivalent ?? v.sqlEquivalent) && (
+                        <code className="flex-shrink-0 px-3 py-1.5 bg-emerald-50 text-emerald-700
+                                         rounded-[7px] text-[12px] font-mono border border-emerald-200/70">
+                          {v.sql_equivalent ?? v.sqlEquivalent}
+                        </code>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )
+            )}
+
+            {/* ── Relationships ── */}
+            {tab === 'relations' && (
+              <div className="space-y-5 max-w-4xl">
+                {outbound.length > 0 && (
+                  <div>
+                    <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3">
+                      {entity.entity_name} connects to
+                    </p>
+                    <div className="space-y-2.5">
+                      {outbound.map((e, i) => {
+                        const tid  = typeof e.target === 'object' ? e.target?.id : e.target;
+                        const tEnt = entityIndex[tid];
+                        const tConf = typeConf(tEnt?.node_type ?? tEnt?.nodeType);
+                        return (
+                          <div key={i}
+                            className="bg-white/80 backdrop-blur-sm border border-gray-200/70
+                                       rounded-xl p-4">
+                            <div className="flex items-center gap-3 mb-2">
+                              <div className="flex items-center gap-2 text-[13.5px] font-semibold text-[#111827]">
+                                <span className="px-2 py-0.5 rounded-md text-[11px] font-semibold"
+                                      style={{ background: conf.bg, color: conf.color }}>
+                                  {entity.entity_name}
+                                </span>
+                                <ArrowRight size={14} className="text-gray-300" />
+                                <span className="px-2 py-0.5 rounded-md text-[11px] font-semibold"
+                                      style={{ background: tConf.bg, color: tConf.color }}>
+                                  {tEnt?.entity_name ?? tid}
+                                </span>
+                              </div>
+                              <span className="ml-auto px-2 py-0.5 rounded-full text-[11px] font-semibold
+                                               bg-gray-100 text-gray-500">
+                                {e.relationshipType ?? e.relationship_type}
+                                {e.cardinality ? ` · ${e.cardinality}` : ''}
+                              </span>
+                            </div>
+                            {(e.sourceColumn ?? e.source_column) && (
+                              <p className="text-[12px] text-gray-400 mb-2 font-mono">
+                                ON {e.sourceColumn ?? e.source_column} = {e.targetColumn ?? e.target_column}
+                              </p>
+                            )}
+                            {(e.joinGuidance ?? e.join_guidance) && (
+                              <code className="block text-[12px] text-emerald-700 bg-emerald-50/80
+                                               border border-emerald-200/70 rounded-[8px] px-3 py-2
+                                               font-mono whitespace-pre-wrap">
+                                {e.joinGuidance ?? e.join_guidance}
+                              </code>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {inbound.length > 0 && (
+                  <div>
+                    <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3">
+                      Referenced by
+                    </p>
+                    <div className="space-y-2.5">
+                      {inbound.map((e, i) => {
+                        const sid  = typeof e.source === 'object' ? e.source?.id : e.source;
+                        const sEnt = entityIndex[sid];
+                        const sConf = typeConf(sEnt?.node_type ?? sEnt?.nodeType);
+                        return (
+                          <div key={i}
+                            className="bg-white/80 backdrop-blur-sm border border-gray-200/70
+                                       rounded-xl p-4 opacity-75">
+                            <div className="flex items-center gap-3">
+                              <span className="px-2 py-0.5 rounded-md text-[11px] font-semibold"
+                                    style={{ background: sConf.bg, color: sConf.color }}>
+                                {sEnt?.entity_name ?? sid}
+                              </span>
+                              <ArrowRight size={13} className="text-gray-300" />
+                              <span className="text-[13px] font-semibold text-[#111827]">
+                                {entity.entity_name}
+                              </span>
+                              <span className="ml-auto text-[11.5px] text-gray-400">
+                                {e.relationshipType ?? e.relationship_type}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {outbound.length === 0 && inbound.length === 0 && (
+                  <div className="text-center py-12 text-[13px] text-gray-400">
+                    No relationships defined. Add them in the Semantic Layer.
+                  </div>
+                )}
+              </div>
+            )}
+
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── JOIN Path Finder ──────────────────────────────────────────────────────────
+
+function JoinPathFinder({ entities, allEdges, entityIndex }) {
+  const [fromKey,   setFromKey]   = useState('');
+  const [toKey,     setToKey]     = useState('');
+  const [pathNodes, setPathNodes] = useState([]);
+  const [pathEdges, setPathEdges] = useState([]);
+  const [loading,   setLoading]   = useState(false);
+  const [error,     setError]     = useState('');
+  const [copied,    copy]         = useCopy();
+
+  const sorted = useMemo(() =>
+    [...entities].sort((a, b) => (a.entity_name ?? '').localeCompare(b.entity_name ?? '')),
+  [entities]);
+
+  const findPath = async () => {
+    if (!fromKey || !toKey || fromKey === toKey) return;
+    setLoading(true); setError(''); setPathNodes([]); setPathEdges([]);
+    try {
+      const data = await api.graph.paths(fromKey, toKey);
+      const nodes = safeArr(data.nodes).map(n => ({
+        id:    n.id    ?? n.entity_key,
+        name:  n.label ?? n.entity_name ?? n.id ?? n.entity_key,
+        type:  n.node_type ?? n.nodeType ?? 'ENTITY',
+        objKey:n.primary_object_key ?? n.primaryObjectKey,
+      }));
+      const edges = safeArr(data.edges).map(e => ({
+        source: typeof e.source === 'object' ? e.source?.id : (e.source ?? e.source_entity_key),
+        target: typeof e.target === 'object' ? e.target?.id : (e.target ?? e.target_entity_key),
+        type:   e.relationship_type ?? e.relationshipType,
+        srcCol: e.source_column ?? e.sourceColumn,
+        tgtCol: e.target_column ?? e.targetColumn,
+        join:   e.join_guidance  ?? e.joinGuidance,
+        card:   e.cardinality,
+      }));
+      if (nodes.length === 0) {
+        // Distinguish: no relationships at all vs genuinely disconnected entities
+        const hasAnyRelationships = allEdges.length > 0;
+        setError(hasAnyRelationships
+          ? `No connection found between these two entities. They are not linked in the semantic model — add a relationship between them in the Semantic Layer to enable path finding.`
+          : `No relationships are defined yet. Go to the Semantic Layer, select an entity, open the Relationships tab, and add connections between entities. Path finding requires at least one relationship.`);
+      } else {
+        setPathNodes(nodes);
+        setPathEdges(edges);
+      }
+    } catch {
+      setError('Unable to find path. Ensure both entities are connected in the semantic layer.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Build the complete JOIN SQL from the path
+  const joinSQL = useMemo(() => {
+    if (pathNodes.length < 2) return '';
+    const first = pathNodes[0];
+    const tableName = n => (n.objKey
+      ? n.objKey.split('-').slice(3).join('_') || n.objKey
+      : n.name.toLowerCase().replace(/\s+/g, '_'));
+    const alias = n => n.name.charAt(0).toLowerCase();
+
+    let sql = `SELECT *\nFROM ${tableName(first)} ${alias(first)}`;
+    for (let i = 1; i < pathNodes.length; i++) {
+      const cur  = pathNodes[i];
+      const prev = pathNodes[i - 1];
+      const edge = pathEdges.find(e =>
+        (e.source === prev.id && e.target === cur.id) ||
+        (e.source === cur.id  && e.target === prev.id));
+
+      if (edge?.join) {
+        sql += `\nJOIN ${tableName(cur)} ${alias(cur)}\n  ON ${edge.join}`;
+      } else if (edge?.srcCol && edge?.tgtCol) {
+        const fromAlias = edge.source === prev.id ? alias(prev) : alias(cur);
+        const toAlias   = edge.source === prev.id ? alias(cur)  : alias(prev);
+        sql += `\nJOIN ${tableName(cur)} ${alias(cur)}\n  ON ${toAlias}.${edge.tgtCol} = ${fromAlias}.${edge.srcCol}`;
+      } else {
+        sql += `\nJOIN ${tableName(cur)} ${alias(cur)} -- JOIN condition not specified`;
+      }
+    }
+    return sql;
+  }, [pathNodes, pathEdges]);
+
+  const askZevra = () => {
+    if (pathNodes.length < 2) return;
+    const chain  = pathNodes.map(n => n.name).join(' → ');
+    const from   = pathNodes[0].name;
+    const to     = pathNodes[pathNodes.length - 1].name;
+    const q = `Using the join path ${chain}, investigate the relationship between ${from} and ${to}. What insights can you find?`;
+    localStorage.setItem('zevra_chat_prefill', q);
+    navigate('/chat');
+  };
+
+  return (
+    <div className="flex-1 min-w-0 overflow-y-auto">
+      <div className="px-7 py-7 max-w-3xl">
+
+        {/* Header */}
+        <div className="mb-7">
+          <h2 className="text-[20px] font-bold text-[#111827] tracking-[-0.025em] mb-1.5">
+            JOIN Path Finder
+          </h2>
+          <p className="text-[13.5px] text-gray-500 leading-relaxed">
+            Select any two entities and Zevra finds the shortest join chain connecting them —
+            with the exact SQL you need to query across them.
+          </p>
+        </div>
+
+        {/* Entity selectors */}
+        <div className="flex items-center gap-3 mb-6">
+          <div className="flex-1">
+            <label className="block text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-1.5">
+              From entity
+            </label>
+            <select value={fromKey} onChange={e => setFromKey(e.target.value)}
+              className="w-full border border-gray-200 rounded-[10px] px-3.5 py-2.5 text-[13.5px]
+                         text-[#111827] bg-white/80 focus:outline-none focus:border-emerald-400
+                         focus:ring-2 focus:ring-emerald-400/20 transition-all">
+              <option value="">Select entity…</option>
+              {sorted.map(e => (
+                <option key={e.entity_key} value={e.entity_key}>{e.entity_name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="mt-5 flex-shrink-0">
+            <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center">
+              <Shuffle size={14} className="text-gray-400" />
+            </div>
+          </div>
+
+          <div className="flex-1">
+            <label className="block text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-1.5">
+              To entity
+            </label>
+            <select value={toKey} onChange={e => setToKey(e.target.value)}
+              className="w-full border border-gray-200 rounded-[10px] px-3.5 py-2.5 text-[13.5px]
+                         text-[#111827] bg-white/80 focus:outline-none focus:border-emerald-400
+                         focus:ring-2 focus:ring-emerald-400/20 transition-all">
+              <option value="">Select entity…</option>
+              {sorted.filter(e => e.entity_key !== fromKey).map(e => (
+                <option key={e.entity_key} value={e.entity_key}>{e.entity_name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="mt-5 flex-shrink-0">
+            <button onClick={findPath}
+              disabled={!fromKey || !toKey || fromKey === toKey || loading}
+              className="h-10 px-5 bg-[#111827] text-white text-[13px] font-semibold
+                         rounded-[10px] hover:bg-[#1F2937] disabled:opacity-40 transition-colors
+                         flex items-center gap-2">
+              {loading ? <Spinner size={4} /> : <Zap size={14} />}
+              Find path
+            </button>
+          </div>
+        </div>
+
+        {/* Error */}
+        {error && (
+          <div className="mb-5 px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl
+                          text-[13px] text-amber-700">
+            {error}
+          </div>
+        )}
+
+        {/* Result */}
+        {pathNodes.length > 0 && (
+          <div className="space-y-5">
+
+            {/* Visual chain */}
+            <div className="bg-white/80 backdrop-blur-sm border border-gray-200/70 rounded-xl p-5">
+              <p className="text-[10.5px] font-semibold text-gray-400 uppercase tracking-widest mb-4">
+                Join chain · {pathNodes.length} entities · {pathEdges.length} joins
+              </p>
+              <div className="flex items-center flex-wrap gap-2">
+                {pathNodes.map((n, i) => {
+                  const conf = typeConf(n.type);
+                  return (
+                    <React.Fragment key={n.id}>
+                      <div className="flex flex-col items-center gap-1.5">
+                        <div className="px-3 py-2 rounded-[9px] text-[13px] font-semibold"
+                             style={{ background: conf.bg, color: conf.color }}>
+                          {n.name}
+                        </div>
+                        <span className="text-[10px] text-gray-400">{conf.label}</span>
+                      </div>
+                      {i < pathNodes.length - 1 && (
+                        <div className="flex flex-col items-center gap-1">
+                          <ArrowRight size={16} className="text-gray-300" />
+                          {pathEdges[i] && (
+                            <span className="text-[10px] text-gray-400 whitespace-nowrap">
+                              {pathEdges[i].type}
+                              {pathEdges[i].card ? ` · ${pathEdges[i].card}` : ''}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* JOIN steps */}
+            {pathEdges.filter(e => e.join || (e.srcCol && e.tgtCol)).length > 0 && (
+              <div>
+                <p className="text-[10.5px] font-semibold text-gray-400 uppercase tracking-widest mb-3">
+                  Join conditions
+                </p>
+                <div className="space-y-2.5">
+                  {pathEdges.map((e, i) => {
+                    const from = pathNodes[i]?.name;
+                    const to   = pathNodes[i + 1]?.name;
+                    if (!e.join && !(e.srcCol && e.tgtCol)) return null;
+                    return (
+                      <div key={i}
+                        className="bg-white/80 backdrop-blur-sm border border-gray-200/70
+                                   rounded-xl overflow-hidden">
+                        <div className="flex items-center gap-2 px-4 py-2.5 bg-gray-50/80
+                                        border-b border-gray-200/70">
+                          <span className="text-[12px] font-medium text-[#374151]">{from}</span>
+                          <ArrowRight size={11} className="text-gray-300" />
+                          <span className="text-[12px] font-medium text-[#374151]">{to}</span>
+                          {e.card && (
+                            <span className="ml-auto text-[11px] text-gray-400">{e.card}</span>
+                          )}
+                        </div>
+                        <div className="px-4 py-3">
+                          <code className="text-[12.5px] text-emerald-700 font-mono">
+                            {e.join || `ON ${to?.toLowerCase().charAt(0)}.${e.tgtCol} = ${from?.toLowerCase().charAt(0)}.${e.srcCol}`}
+                          </code>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Complete SQL */}
+            {joinSQL && (
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-[10.5px] font-semibold text-gray-400 uppercase tracking-widest">
+                    Complete SQL
+                  </p>
+                  <button onClick={() => copy(joinSQL)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-[7px] text-[12px]
+                               font-medium transition-all text-gray-500 hover:text-gray-700
+                               hover:bg-gray-100">
+                    {copied ? <ClipboardCheck size={13} className="text-emerald-500" /> : <Clipboard size={13} />}
+                    {copied ? 'Copied!' : 'Copy SQL'}
+                  </button>
+                </div>
+                <div className="bg-[#0D1117] rounded-xl overflow-hidden border border-gray-800">
+                  <pre className="px-5 py-4 text-[13px] text-emerald-400 font-mono
+                                  leading-relaxed overflow-x-auto whitespace-pre">
+                    {joinSQL}
+                  </pre>
+                </div>
+              </div>
+            )}
+
+            {/* Ask Zevra */}
+            <div className="flex gap-3 pt-1">
+              <button onClick={askZevra}
+                className="flex-1 flex items-center justify-center gap-2.5 py-3 rounded-[10px]
+                           bg-[#111827] text-white text-[13.5px] font-semibold
+                           hover:bg-[#1F2937] transition-colors">
+                <MessageSquare size={15} />
+                Investigate this path in Zevra
+              </button>
+              <button onClick={() => copy(joinSQL)}
+                className="px-5 py-3 rounded-[10px] border border-gray-200 bg-white/80
+                           text-[13px] font-medium text-gray-600 hover:bg-gray-50 transition-colors
+                           flex items-center gap-2">
+                {copied ? <ClipboardCheck size={14} className="text-emerald-500" /> : <Clipboard size={14} />}
+                {copied ? 'Copied' : 'Copy SQL'}
+              </button>
+            </div>
+
+          </div>
+        )}
+
+        {/* Empty state */}
+        {!loading && pathNodes.length === 0 && !error && (
+          <div className="text-center py-14">
+            <div className="w-16 h-16 rounded-2xl bg-gray-100/80 flex items-center justify-center
+                            mx-auto mb-4">
+              <Shuffle size={26} className="text-gray-300" />
+            </div>
+            <p className="text-[14px] font-semibold text-[#374151] mb-2">
+              Discover how entities connect
+            </p>
+            <p className="text-[13px] text-gray-400 max-w-sm mx-auto leading-relaxed">
+              Select a start and end entity above. Zevra will find the shortest join chain
+              and generate the SQL you need.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function KnowledgeGraph() {
-  const graphRef = useRef(null);
-  const containerRef = useRef(null);
-  const [dims, setDims] = useState({ w: 800, h: 600 });
-
-  const [domains, setDomains]               = useState([]);
+  const [domains,        setDomains]        = useState([]);
   const [selectedDomain, setSelectedDomain] = useState('');
-  const [graphData, setGraphData]           = useState({ nodes: [], links: [] });
-  const [rawEdges, setRawEdges]             = useState([]);
-  const [loading, setLoading]               = useState(false);
-  const [error, setError]                   = useState('');
-  const [selectedNode, setSelectedNode]     = useState(null);
-  const [search, setSearch]                 = useState('');
-  const [hoverNode, setHoverNode]           = useState(null);
+  const [entities,       setEntities]       = useState([]);
+  const [allEdges,       setAllEdges]       = useState([]);
+  const [loading,        setLoading]        = useState(false);
+  const [view,           setView]           = useState('explore'); // 'explore' | 'path'
+  const [selectedEntity, setSelectedEntity] = useState(null);
+  const [search,         setSearch]         = useState('');
+  const [discovering,    setDiscovering]    = useState(false);
+  const [discoverMsg,    setDiscoverMsg]    = useState('');
 
-  // track container size
-  useEffect(() => {
-    if (!containerRef.current) return;
-    const ro = new ResizeObserver(entries => {
-      for (const e of entries) {
-        setDims({ w: e.contentRect.width, h: e.contentRect.height });
-      }
-    });
-    ro.observe(containerRef.current);
-    setDims({ w: containerRef.current.clientWidth, h: containerRef.current.clientHeight });
-    return () => ro.disconnect();
-  }, []);
+  // Fast entity lookup by key
+  const entityIndex = useMemo(() => {
+    const idx = {};
+    entities.forEach(e => { idx[e.entity_key] = e; });
+    return idx;
+  }, [entities]);
 
-  // load domains
+  // Load domains
   useEffect(() => {
     api.domains.list()
       .then(ds => {
-        const arr = safeArray(ds);
+        const arr = safeArr(ds);
         setDomains(arr);
-        if (arr.length) setSelectedDomain(arr[0].domain_key ?? arr[0].domainKey);
+        if (arr.length) setSelectedDomain(arr[0].domain_key ?? arr[0].domainKey ?? '');
       })
       .catch(() => {});
   }, []);
 
-  // load graph
-  const loadGraph = useCallback(async (domainKey) => {
-    if (!domainKey) return;
+  // Load entities + edges for selected domain
+  useEffect(() => {
+    if (!selectedDomain) return;
     setLoading(true);
-    setError('');
-    setSelectedNode(null);
-    try {
-      const data = await api.graph.full(domainKey);
-      const nodes = safeArray(data.nodes).map(normaliseNode);
-      const edges = safeArray(data.edges).map(normaliseEdge);
-      setRawEdges(edges);
-      setGraphData({ nodes, links: edges });
-      setTimeout(() => graphRef.current?.zoomToFit(600, 80), 600);
-    } catch (err) {
-      setError(err.message || 'Failed to load knowledge graph');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { loadGraph(selectedDomain); }, [selectedDomain, loadGraph]);
-
-  // expand neighbours
-  const expandNeighbors = useCallback(async (entityKey) => {
-    setLoading(true);
-    try {
-      const data = await api.graph.neighbors(entityKey, 2);
-      const newNodes = safeArray(data.nodes).map(normaliseNode);
-      const newEdges = safeArray(data.edges).map(normaliseEdge);
-      setGraphData(prev => {
-        const existIds  = new Set(prev.nodes.map(n => n.id));
-        const existLIds = new Set(prev.links.map(l => l.id));
-        return {
-          nodes: [...prev.nodes, ...newNodes.filter(n => !existIds.has(n.id))],
-          links: [...prev.links, ...newEdges.filter(e => !existLIds.has(e.id))],
-        };
-      });
-      setRawEdges(prev => {
-        const ids = new Set(prev.map(e => e.id));
-        return [...prev, ...newEdges.filter(e => !ids.has(e.id))];
-      });
-    } catch {}
-    finally { setLoading(false); }
-  }, []);
-
-  // search-filtered highlight sets
-  const { highlightNodes, highlightLinks } = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return { highlightNodes: null, highlightLinks: null };
-    const hNodes = new Set(
-      graphData.nodes
-        .filter(n => n.label?.toLowerCase().includes(q) || n.description?.toLowerCase().includes(q))
-        .map(n => n.id)
-    );
-    const hLinks = new Set(
-      graphData.links.filter(l => {
-        const s = typeof l.source === 'object' ? l.source.id : l.source;
-        const t = typeof l.target === 'object' ? l.target.id : l.target;
-        return hNodes.has(s) || hNodes.has(t);
+    setSelectedEntity(null);
+    api.graph.full(selectedDomain)
+      .then(data => {
+        // GraphNode record serialises as { id, label, node_type, ... }
+        // Normalise to consistent shape so all child components use entity_key / entity_name
+        const nodes = safeArr(data.nodes).map(n => ({
+          ...n,
+          entity_key:          n.entity_key          ?? n.id,
+          entity_name:         n.entity_name         ?? n.label,
+          node_type:           n.node_type           ?? n.nodeType,
+          primary_object_key:  n.primary_object_key  ?? n.primaryObjectKey,
+          domain_key:          n.domain_key          ?? n.domainKey,
+          operational_meaning: n.operational_meaning ?? n.operationalMeaning,
+          investigation_hints: n.investigation_hints ?? n.investigationHints,
+        }));
+        const edges = safeArr(data.edges).map(e => ({
+          ...e,
+          source:            e.source            ?? e.source_entity_key,
+          target:            e.target            ?? e.target_entity_key,
+          relationshipType:  e.relationship_type ?? e.relationshipType,
+          joinGuidance:      e.join_guidance     ?? e.joinGuidance,
+          sourceColumn:      e.source_column     ?? e.sourceColumn,
+          targetColumn:      e.target_column     ?? e.targetColumn,
+        }));
+        setEntities(nodes);
+        setAllEdges(edges);
       })
-    );
-    return { highlightNodes: hNodes, highlightLinks: hLinks };
-  }, [search, graphData]);
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [selectedDomain]);
 
-  // canvas: draw node
-  const drawNode = useCallback((node, ctx, globalScale) => {
-    const style    = nodeStyle(node.nodeType);
-    const color    = node.color || style.color;
-    const r        = style.radius;
-    const isSelected = selectedNode?.id === node.id;
-    const isHover    = hoverNode?.id === node.id;
-    const isDimmed   = highlightNodes && !highlightNodes.has(node.id) && !isSelected;
-    const alpha      = isDimmed ? 0.15 : 1;
-
-    ctx.save();
-    ctx.globalAlpha = alpha;
-
-    // glow for selected / hover
-    if (isSelected || isHover) {
-      ctx.shadowColor = color;
-      ctx.shadowBlur  = isSelected ? 22 : 12;
-    }
-
-    // outer ring for selected
-    if (isSelected) {
-      ctx.beginPath();
-      ctx.arc(node.x, node.y, r + 5, 0, 2 * Math.PI);
-      ctx.strokeStyle = color + '60';
-      ctx.lineWidth   = 2;
-      ctx.stroke();
-    }
-
-    // node fill with radial gradient
-    const grad = ctx.createRadialGradient(
-      node.x - r * 0.3, node.y - r * 0.3, 0,
-      node.x, node.y, r
-    );
-    grad.addColorStop(0, lighten(color, 0.35));
-    grad.addColorStop(1, color);
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
-    ctx.fillStyle = grad;
-    ctx.fill();
-
-    // border
-    ctx.strokeStyle = isSelected ? '#fff' : color + 'AA';
-    ctx.lineWidth   = isSelected ? 2 : 1;
-    ctx.stroke();
-
-    ctx.shadowBlur = 0;
-
-    // label — always visible, sized by zoom
-    const label    = truncate(node.label, 18);
-    const fontSize = Math.max(isSelected ? 11 : 9, Math.min(13, 11 / Math.max(0.6, globalScale)));
-    ctx.font       = `${isSelected ? '700' : '500'} ${fontSize}px Inter, system-ui, sans-serif`;
-    ctx.fillStyle  = isSelected ? '#fff' : 'rgba(255,255,255,0.85)';
-    ctx.textAlign  = 'center';
-    ctx.textBaseline = 'top';
-
-    // label background pill
-    const tw = ctx.measureText(label).width;
-    const lx = node.x - tw / 2 - 4;
-    const ly = node.y + r + 4;
-    ctx.fillStyle = 'rgba(14,17,23,0.75)';
-    ctx.beginPath();
-    ctx.roundRect(lx, ly, tw + 8, fontSize + 5, 3);
-    ctx.fill();
-
-    ctx.fillStyle  = isSelected ? '#fff' : 'rgba(255,255,255,0.80)';
-    ctx.fillText(label, node.x, ly + 2.5);
-
-    ctx.restore();
-  }, [selectedNode, hoverNode, highlightNodes]);
-
-  // canvas: link
-  const linkColor = useCallback((link) => {
-    const isDimmed = highlightLinks && !highlightLinks.has(link);
-    const base = link.edgeColor || '#374151';
-    return isDimmed ? base + '18' : base + 'BB';
-  }, [highlightLinks]);
-
-  const linkWidth = useCallback((link) => {
-    return highlightLinks?.has(link) ? 2.5 : 1.2;
-  }, [highlightLinks]);
-
-  // stats
+  // Stats
   const stats = useMemo(() => {
-    const groups = {};
-    graphData.nodes.forEach(n => {
-      const g = n.groupLabel || 'General';
-      groups[g] = (groups[g] || 0) + 1;
+    const byType = {};
+    entities.forEach(e => {
+      const t = e.node_type ?? e.nodeType ?? 'ENTITY';
+      byType[t] = (byType[t] || 0) + 1;
     });
-    return { nodes: graphData.nodes.length, edges: graphData.links.length, groups };
-  }, [graphData]);
-
-  const panelOpen = !!selectedNode;
-  const canvasW   = panelOpen ? Math.max(200, dims.w - 340) : dims.w;
+    return { total: entities.length, edges: allEdges.length, byType };
+  }, [entities, allEdges]);
 
   return (
-    <div className="flex-1 flex overflow-hidden" style={{ background: CANVAS_BG }}>
+    <div className="flex-1 flex flex-col overflow-hidden bg-transparent">
 
-      {/* ── left: graph canvas ── */}
-      <div ref={containerRef} className="flex-1 flex flex-col relative overflow-hidden">
+      {/* Page header */}
+      <div className="flex-shrink-0 px-7 pt-6 pb-4 bg-white/40 backdrop-blur-sm
+                      border-b border-gray-200/70">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-[20px] font-bold text-[#111827] tracking-[-0.025em]">
+              Knowledge Graph
+            </h1>
+            <p className="text-[13px] text-gray-400 mt-1">
+              {stats.total} entities · {stats.edges} relationships
+              {domains.length > 1 && ` in domain ${selectedDomain}`}
+              {discoverMsg && (
+                <span className="ml-2 text-emerald-600 font-medium">{discoverMsg}</span>
+              )}
+            </p>
+          </div>
 
-        {/* Toolbar */}
-        <div className="shrink-0 h-14 flex items-center gap-3 px-5 border-b border-white/8 bg-[#13181F]/80 backdrop-blur z-10">
-
-          {/* Domain */}
-          <div className="flex items-center gap-2">
-            <Layers size={15} className="text-white/30" />
-            <select
-              value={selectedDomain}
-              onChange={e => setSelectedDomain(e.target.value)}
-              className="h-8 bg-white/8 border border-white/10 rounded-lg text-sm text-white/80 px-2.5 focus:outline-none focus:border-emerald-500/50 appearance-none cursor-pointer"
+          <div className="flex items-center gap-2.5">
+            {/* Auto-discover relationships from FK + heuristics */}
+            <button
+              onClick={async () => {
+                setDiscovering(true); setDiscoverMsg('');
+                try {
+                  const conns = await api.connections.list();
+                  if (!conns?.length) {
+                    setDiscoverMsg('No connections configured.');
+                    return;
+                  }
+                  const conn = conns[0];
+                  const res  = await api.semantic.discoverRelationships({
+                    connectionKey: conn.connection_key,
+                    schemaName:    conn.allowed_schemas?.split(',')[0]?.trim() || 'public',
+                    domainKey:     selectedDomain,
+                  });
+                  const n = res.relationships_created ?? 0;
+                  setDiscoverMsg(n > 0 ? `✓ ${n} relationships discovered` : 'No new relationships found');
+                  if (n > 0) {
+                    // Reload graph to show newly discovered edges
+                    const data = await api.graph.full(selectedDomain);
+                    setEntities(safeArr(data.nodes).map(n => ({ ...n, entity_key: n.entity_key ?? n.id, entity_name: n.entity_name ?? n.label })));
+                    setAllEdges(safeArr(data.edges).map(e => ({ ...e, source: e.source ?? e.source_entity_key, target: e.target ?? e.target_entity_key })));
+                  }
+                  setTimeout(() => setDiscoverMsg(''), 5000);
+                } catch (e) {
+                  setDiscoverMsg('Discovery failed: ' + (e.message || 'Unknown error'));
+                  setTimeout(() => setDiscoverMsg(''), 6000);
+                } finally {
+                  setDiscovering(false);
+                }
+              }}
+              disabled={discovering || !selectedDomain}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-[8px] text-[13px]
+                         font-medium border border-emerald-200 bg-emerald-50 text-emerald-700
+                         hover:bg-emerald-100 disabled:opacity-50 transition-colors"
             >
-              {domains.map(d => {
-                const k = d.domain_key ?? d.domainKey;
-                return <option key={k} value={k} className="bg-gray-900">{d.name}</option>;
-              })}
-            </select>
-          </div>
+              {discovering
+                ? <><Spinner size={3} /> Discovering…</>
+                : <><RefreshCw size={13} /> Auto-discover relationships</>}
+            </button>
 
-          <div className="h-5 w-px bg-white/10" />
-
-          {/* Search */}
-          <div className="relative">
-            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-white/30" />
-            <input
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search nodes…"
-              className="h-8 w-44 bg-white/8 border border-white/10 rounded-lg pl-8 pr-3 text-sm text-white/80 placeholder:text-white/25 focus:outline-none focus:border-emerald-500/50"
-            />
-            {search && (
-              <button onClick={() => setSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/60">
-                <X size={12} />
-              </button>
+            {/* Domain selector */}
+            {domains.length > 1 && (
+              <select value={selectedDomain}
+                onChange={e => setSelectedDomain(e.target.value)}
+                className="border border-gray-200 rounded-[8px] px-3 py-2 text-[13px]
+                           text-[#111827] bg-white/80 focus:outline-none focus:border-emerald-400
+                           transition-colors">
+                {domains.map(d => {
+                  const k = d.domain_key ?? d.domainKey;
+                  return <option key={k} value={k}>{d.name}</option>;
+                })}
+              </select>
             )}
-          </div>
 
-          {/* Stats */}
-          <div className="ml-auto flex items-center gap-3 text-xs text-white/30">
-            <span>{stats.nodes} nodes</span>
-            <span className="w-px h-3 bg-white/10" />
-            <span>{stats.edges} edges</span>
-          </div>
-
-          <div className="h-5 w-px bg-white/10" />
-
-          {/* Zoom fit */}
-          <button
-            onClick={() => graphRef.current?.zoomToFit(400, 60)}
-            className="h-8 px-3 rounded-lg bg-white/8 border border-white/10 text-sm text-white/60 hover:text-white hover:bg-white/12 transition-colors flex items-center gap-1.5"
-          >
-            <Maximize2 size={13} /> Fit
-          </button>
-
-          {/* Reload */}
-          <button
-            onClick={() => loadGraph(selectedDomain)}
-            disabled={loading}
-            className="h-8 w-8 rounded-lg bg-white/8 border border-white/10 flex items-center justify-center text-white/60 hover:text-white hover:bg-white/12 transition-colors disabled:opacity-30"
-          >
-            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
-          </button>
-        </div>
-
-        {/* Canvas */}
-        <div className="flex-1 relative">
-          {loading && (
-            <div className="absolute inset-0 flex items-center justify-center bg-[#0E1117]/80 z-10">
-              <div className="flex flex-col items-center gap-4">
-                <div className="w-12 h-12 border-[3px] border-emerald-500/30 border-t-emerald-500 rounded-full animate-spin" />
-                <p className="text-sm text-white/40">Loading graph…</p>
-              </div>
-            </div>
-          )}
-
-          {error && (
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-red-500/10 border border-red-500/30 text-red-400 text-sm px-4 py-2 rounded-lg z-10">
-              {error}
-            </div>
-          )}
-
-          {!loading && graphData.nodes.length === 0 && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center text-white/20">
-              <div className="text-8xl mb-4 opacity-30">⬡</div>
-              <p className="text-lg font-medium">No entities in this domain</p>
-              <p className="text-sm mt-1">Add entities via the Semantic Layer page.</p>
-            </div>
-          )}
-
-          <ForceGraph2D
-            ref={graphRef}
-            width={canvasW}
-            height={dims.h - 56}
-            graphData={graphData}
-            nodeId="id"
-            nodeLabel={() => ''}
-            linkSource="source"
-            linkTarget="target"
-            linkColor={linkColor}
-            linkWidth={linkWidth}
-            linkDirectionalArrowLength={6}
-            linkDirectionalArrowRelPos={1}
-            linkDirectionalArrowColor={linkColor}
-            linkCurvature={0.15}
-            linkDirectionalParticles={2}
-            linkDirectionalParticleWidth={link => highlightLinks?.has(link) ? 3 : 1.5}
-            linkDirectionalParticleSpeed={0.003}
-            linkDirectionalParticleColor={linkColor}
-            nodeCanvasObject={drawNode}
-            nodeCanvasObjectMode={() => 'replace'}
-            onNodeClick={node => setSelectedNode(prev => prev?.id === node.id ? null : node)}
-            onNodeHover={setHoverNode}
-            onBackgroundClick={() => { setSelectedNode(null); setSearch(''); }}
-            cooldownTicks={150}
-            d3AlphaDecay={0.02}
-            d3VelocityDecay={0.35}
-            backgroundColor={CANVAS_BG}
-            nodePointerAreaPaint={(node, color, ctx) => {
-              const r = nodeStyle(node.nodeType).radius + 6;
-              ctx.fillStyle = color;
-              ctx.beginPath();
-              ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
-              ctx.fill();
-            }}
-          />
-
-          {/* Legend */}
-          <div className="absolute bottom-5 left-5 rounded-xl bg-[#13181F]/90 backdrop-blur border border-white/8 px-4 py-3 z-10">
-            <p className="text-2xs font-semibold text-white/30 uppercase tracking-widest mb-2.5">Node types</p>
-            <div className="grid grid-cols-2 gap-x-5 gap-y-1.5">
-              {Object.entries(NODE_STYLES).filter(([k]) => k !== 'DEFAULT').map(([type, s]) => (
-                <div key={type} className="flex items-center gap-2">
-                  <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: s.color, boxShadow: `0 0 6px ${s.color}80` }} />
-                  <span className="text-xs text-white/45">{s.label}</span>
-                </div>
+            {/* View toggle */}
+            <div className="flex gap-1 bg-gray-100/80 p-1 rounded-[9px]">
+              {[['explore', 'Explore'], ['path', 'Find JOIN path']].map(([k, l]) => (
+                <button key={k} onClick={() => setView(k)}
+                  className={`px-3.5 py-1.5 rounded-[7px] text-[12.5px] font-medium transition-all
+                    ${view === k
+                      ? 'bg-white text-[#111827] shadow-sm'
+                      : 'text-gray-400 hover:text-gray-600'}`}>
+                  {l}
+                </button>
               ))}
             </div>
-            <p className="mt-3 text-2xs text-white/20">Click node · Scroll to zoom · Drag to pan</p>
           </div>
-
-          {/* Group summary */}
-          {Object.keys(stats.groups).length > 0 && !panelOpen && (
-            <div className="absolute bottom-5 right-5 rounded-xl bg-[#13181F]/90 backdrop-blur border border-white/8 px-4 py-3 z-10">
-              <p className="text-2xs font-semibold text-white/30 uppercase tracking-widest mb-2.5">Groups</p>
-              <div className="space-y-1.5">
-                {Object.entries(stats.groups).map(([g, c]) => (
-                  <div key={g} className="flex items-center justify-between gap-6">
-                    <span className="text-xs text-white/50">{g}</span>
-                    <span className="text-xs font-semibold text-white/70">{c}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       </div>
 
-      {/* ── right: detail panel ── */}
-      {panelOpen && (
-        <DetailPanel
-          node={selectedNode}
-          edges={rawEdges}
-          onClose={() => setSelectedNode(null)}
-          onExpand={expandNeighbors}
-        />
-      )}
+      {/* Main content */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
+        {loading ? (
+          <div className="flex-1 flex items-center justify-center">
+            <Spinner />
+          </div>
+        ) : (
+          <>
+            {/* Left: entity list (always visible) */}
+            <EntityList
+              entities={entities}
+              selected={selectedEntity}
+              onSelect={e => { setSelectedEntity(e); setView('explore'); }}
+              search={search}
+              onSearchChange={setSearch}
+            />
+
+            {/* Right: entity detail OR path finder */}
+            {view === 'explore' ? (
+              selectedEntity ? (
+                <EntityDetail
+                  entity={selectedEntity}
+                  allEdges={allEdges}
+                  entityIndex={entityIndex}
+                />
+              ) : (
+                <div className="flex-1 flex items-center justify-center bg-transparent">
+                  <div className="text-center max-w-sm">
+                    <div className="w-16 h-16 rounded-2xl bg-white/80 border border-gray-200/70
+                                    flex items-center justify-center mx-auto mb-4 shadow-sm">
+                      <Search size={26} className="text-gray-300" />
+                    </div>
+                    <p className="text-[15px] font-semibold text-[#374151] mb-2">
+                      Select an entity
+                    </p>
+                    <p className="text-[13px] text-gray-400 leading-relaxed">
+                      Choose an entity from the list to explore its columns, vocabulary,
+                      relationships, and JOIN guidance.
+                    </p>
+                    <button onClick={() => setView('path')}
+                      className="mt-4 flex items-center gap-2 mx-auto px-4 py-2 rounded-[8px]
+                                 border border-gray-200 bg-white/80 text-[13px] font-medium
+                                 text-gray-600 hover:bg-gray-50 transition-colors">
+                      <Shuffle size={13} /> Or find a JOIN path between two entities
+                    </button>
+                  </div>
+                </div>
+              )
+            ) : (
+              <JoinPathFinder
+                entities={entities}
+                allEdges={allEdges}
+                entityIndex={entityIndex}
+              />
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
-}
-
-// ── colour util ───────────────────────────────────────────────────────────────
-
-function lighten(hex, amount) {
-  const num = parseInt(hex.replace('#', ''), 16);
-  const r = Math.min(255, (num >> 16) + Math.round(255 * amount));
-  const g = Math.min(255, ((num >> 8) & 0xff) + Math.round(255 * amount));
-  const b = Math.min(255, (num & 0xff) + Math.round(255 * amount));
-  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
 }

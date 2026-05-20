@@ -146,7 +146,8 @@ export const api = {
     createLifecycle: (key, body)    => post(`/semantic/entities/${key}/lifecycle`, body),
     vocabulary:      (domainKey)    => get(`/semantic/vocabulary?domainKey=${encodeURIComponent(domainKey)}`),
     createVocab:     (body)         => post('/semantic/vocabulary', body),
-    discover:        (body)         => post('/semantic/discover', body),
+    discover:             (body)          => post('/semantic/discover', body),
+    discoverRelationships:(body)          => post('/semantic/discover-relationships', body),
   },
 
   // ── Agents ─────────────────────────────────────────────────────────────────
@@ -183,6 +184,17 @@ export const api = {
     patchAnomaly:    (key, body)    => patch(`/temporal/anomalies/${key}`, body),
   },
 
+  // ── Onboarding ─────────────────────────────────────────────────────────────
+  onboarding: {
+    status:    ()     => get('/onboarding/status'),
+    recommend: (body) => post('/onboarding/recommend', body),
+    scan:      (body) => post('/onboarding/scan', body),
+    analyze:   (body) => post('/onboarding/analyze', body),
+    apply:     (body) => post('/onboarding/apply', body),
+    complete:  ()     => post('/onboarding/complete'),
+    reset:     ()     => post('/onboarding/reset'),
+  },
+
   // ── Knowledge Graph ────────────────────────────────────────────────────────
   graph: {
     full:      (domainKey)     => get(domainKey ? `/knowledge-graph?domainKey=${encodeURIComponent(domainKey)}` : '/knowledge-graph'),
@@ -202,5 +214,41 @@ export const api = {
   // ── Query Executions ───────────────────────────────────────────────────────
   query: {
     get: (key) => get(`/query-executions/${key}`),
+  },
+
+  // ── Chat Attachments (file upload + image paste) ──────────────────────────
+  attachments: {
+    upload: (file, conversationId) => {
+      const form = new FormData();
+      form.append('file', file);
+      if (conversationId) form.append('conversationId', conversationId);
+      return post('/chat/attachments', form, true);
+    },
+    get:  (key) => get(`/chat/attachments/${key}`),
+    list: (conversationId) => get(`/chat/attachments?conversationId=${encodeURIComponent(conversationId)}`),
+  },
+
+  // ── Scheduled Reports ──────────────────────────────────────────────────────
+  reports: {
+    list:   ()           => get('/reports'),
+    create: (body)       => post('/reports', body),
+    update: (key, body)  => put(`/reports/${key}`, body),
+    delete: (key)        => del(`/reports/${key}`),
+    run:    (key)        => post(`/reports/${key}/run`),
+  },
+
+  // ── Proactive Alerts ───────────────────────────────────────────────────────
+  alerts: {
+    list:        (limit = 50)  => get(`/alerts?limit=${limit}`),
+    unreadCount: ()            => get('/alerts/unread-count'),
+    markRead:    (key)         => post(`/alerts/${key}/read`),
+    markAllRead: ()            => post('/alerts/read-all'),
+    rules: {
+      list:   ()           => get('/alert-rules'),
+      create: (body)       => post('/alert-rules', body),
+      update: (key, body)  => put(`/alert-rules/${key}`, body),
+      delete: (key)        => del(`/alert-rules/${key}`),
+      test:   (key)        => post(`/alert-rules/${key}/test`),
+    },
   },
 };

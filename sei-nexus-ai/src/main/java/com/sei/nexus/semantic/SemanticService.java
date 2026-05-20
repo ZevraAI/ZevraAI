@@ -1,7 +1,6 @@
 package com.sei.nexus.semantic;
 
 import com.sei.nexus.ai.AzureOpenAiClient;
-import com.sei.nexus.ai.ChatMessage;
 import com.sei.nexus.common.Keys;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,7 +10,6 @@ import org.springframework.stereotype.Service;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 @Service
 public class SemanticService {
@@ -19,13 +17,13 @@ public class SemanticService {
     private static final Logger log = LoggerFactory.getLogger(SemanticService.class);
 
     private static final String FIND_ENTITIES =
-            "SELECT entity_key, entity_name, entity_type, description, domain_key, " +
-            "canonical_identifiers, synonyms, status " +
+            "SELECT entity_key, entity_name, node_type, description, " +
+            "operational_meaning, investigation_hints, status " +
             "FROM nexus_business_entity WHERE domain_key = ANY(?::text[]) AND status = 'ACTIVE' LIMIT 50";
 
     private static final String FIND_VOCABULARY =
-            "SELECT term, definition, synonyms, domain_key " +
-            "FROM nexus_operational_vocabulary WHERE domain_key = ANY(?::text[]) LIMIT 30";
+            "SELECT term, definition, sql_equivalent " +
+            "FROM nexus_operational_vocabulary WHERE domain_key = ANY(?::text[]) AND status = 'ACTIVE' LIMIT 30";
 
     private final JdbcTemplate jdbc;
     private final AzureOpenAiClient aiClient;
@@ -54,15 +52,16 @@ public class SemanticService {
             List<String> entityRows = jdbc.query(FIND_ENTITIES,
                     ps -> ps.setArray(1, ps.getConnection().createArrayOf("text", domainArray)),
                     (rs, rowNum) -> {
-                        String name = rs.getString("entity_name");
-                        String type = rs.getString("entity_type");
-                        String desc = rs.getString("description");
-                        String synonyms = rs.getString("synonyms");
-                        String id = rs.getString("canonical_identifiers");
-                        StringBuilder row = new StringBuilder(name).append(" (").append(type).append(")");
+                        String name    = rs.getString("entity_name");
+                        String type    = rs.getString("node_type");
+                        String desc    = rs.getString("description");
+                        String meaning = rs.getString("operational_meaning");
+                        String hints   = rs.getString("investigation_hints");
+                        StringBuilder row = new StringBuilder(name);
+                        if (type != null && !type.isBlank()) row.append(" (").append(type).append(")");
                         if (desc != null && !desc.isBlank()) row.append(": ").append(desc);
-                        if (synonyms != null && !synonyms.isBlank()) row.append(" [also: ").append(synonyms).append("]");
-                        if (id != null && !id.isBlank()) row.append(" [id: ").append(id).append("]");
+                        if (meaning != null && !meaning.isBlank()) row.append(" | ").append(meaning);
+                        if (hints != null && !hints.isBlank()) row.append(" | Hint: ").append(hints);
                         return row.toString();
                     });
 
@@ -77,10 +76,10 @@ public class SemanticService {
                     ps -> ps.setArray(1, ps.getConnection().createArrayOf("text", domainArray)),
                     (rs, rowNum) -> {
                         String term = rs.getString("term");
-                        String def = rs.getString("definition");
-                        String synonyms = rs.getString("synonyms");
-                        String row = term + ": " + def;
-                        return (synonyms != null && !synonyms.isBlank()) ? row + " [synonyms: " + synonyms + "]" : row;
+                        String def  = rs.getString("definition");
+                        String sql  = rs.getString("sql_equivalent");
+                        String row  = term + ": " + def;
+                        return (sql != null && !sql.isBlank()) ? row + " [SQL: " + sql + "]" : row;
                     });
 
             if (!vocabRows.isEmpty()) {
@@ -100,19 +99,18 @@ public class SemanticService {
     // -------------------------------------------------------------------------
 
     public BusinessEntity createOrUpdateEntity(Map<String, Object> body, String userEmail) {
-        String entityKey = body.containsKey("entityKey")
-                ? (String) body.get("entityKey")
-                : Keys.uniqueKey("entity");
+        String entityKey = str(body, "entityKey", "entity_key");
+        if (entityKey == null || entityKey.isBlank()) entityKey = Keys.uniqueKey("entity");
         Instant now = Instant.now();
         BusinessEntity entity = new BusinessEntity(
                 entityKey,
-                (String) body.get("domainKey"),
-                (String) body.get("entityName"),
-                (String) body.get("description"),
-                (String) body.get("primaryObjectKey"),
-                (String) body.get("operationalMeaning"),
-                (String) body.get("investigationHints"),
-                (String) body.getOrDefault("status", "ACTIVE"),
+                str(body, "domainKey",          "domain_key"),
+                str(body, "entityName",          "entity_name"),
+                str(body, "description"),
+                str(body, "primaryObjectKey",    "primary_object_key"),
+                str(body, "operationalMeaning",  "operational_meaning"),
+                str(body, "investigationHints",  "investigation_hints"),
+                str(body, "status") != null ? str(body, "status") : "ACTIVE",
                 userEmail,
                 now, now);
         repository.saveEntity(entity);
@@ -160,22 +158,33 @@ public class SemanticService {
     }
 
     public OperationalVocabulary createTerm(Map<String, Object> body) {
-        String termKey = body.containsKey("termKey")
-                ? (String) body.get("termKey")
-                : Keys.uniqueKey("term");
+        String termKey = str(body, "termKey", "term_key");
+        if (termKey == null || termKey.isBlank()) termKey = Keys.uniqueKey("term");
         Instant now = Instant.now();
         OperationalVocabulary term = new OperationalVocabulary(
                 termKey,
-                (String) body.get("domainKey"),
-                (String) body.get("entityKey"),
-                (String) body.get("term"),
-                (String) body.get("definition"),
-                (String) body.get("sqlEquivalent"),
-                (String) body.get("examples"),
-                (String) body.getOrDefault("status", "ACTIVE"),
+                str(body, "domainKey",     "domain_key"),
+                str(body, "entityKey",     "entity_key"),
+                str(body, "term"),
+                str(body, "definition"),
+                str(body, "sqlEquivalent", "sql_equivalent"),
+                str(body, "examples"),
+                str(body, "status") != null ? str(body, "status") : "ACTIVE",
                 now, now);
         repository.saveTerm(term);
         return term;
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** Reads the first non-null value for a list of key aliases.
+     *  Accepts both camelCase and snake_case callers without duplicating logic. */
+    private String str(Map<String, Object> body, String... keys) {
+        for (String key : keys) {
+            Object v = body.get(key);
+            if (v != null && !v.toString().isBlank()) return v.toString();
+        }
+        return null;
     }
 
     public EntityDataMapping addMapping(String entityKey, Map<String, Object> body) {

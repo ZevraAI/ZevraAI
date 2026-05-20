@@ -1,11 +1,24 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import {
-  ArrowLeft, Bot, Database, FileText, Filter,
-  MoreHorizontal, Search, Send, Sparkles, User, Users, X,
+  ArrowLeft, Bot, CalendarClock, Clipboard, Clock, Database, Download, FileDown,
+  FileSpreadsheet, FileText, Layers, MoreHorizontal, Network, Paperclip, Printer,
+  Search, Send, Sparkles, User, Users, X,
 } from 'lucide-react';
 import { api } from '../api.js';
-import { useAuth } from '../App.jsx';
+import { useAuth, navigate } from '../App.jsx';
+
+// ── Quick access tiles shown on the home landing ──────────────────────────
+const QUICK_TILES = [
+  { label: 'Investigations', path: '/chat',        gradient: 'bg-gradient-to-br from-emerald-100 to-emerald-200', iconColor: '#059669', Icon: Sparkles   },
+  { label: 'Agents',         path: '/agents',      gradient: 'bg-gradient-to-br from-blue-100 to-blue-200',       iconColor: '#3B82F6', Icon: Users      },
+  { label: 'Knowledge Graph',path: '/graph',       gradient: 'bg-gradient-to-br from-violet-100 to-violet-200',   iconColor: '#7C3AED', Icon: Network    },
+  { label: 'Semantic Layer', path: '/semantic',    gradient: 'bg-gradient-to-br from-orange-100 to-orange-200',   iconColor: '#EA580C', Icon: Layers     },
+  { label: 'Connections',    path: '/connections', gradient: 'bg-gradient-to-br from-sky-100 to-sky-200',         iconColor: '#0284C7', Icon: Database   },
+  { label: 'AI Memory',      path: '/memory',      gradient: 'bg-gradient-to-br from-pink-100 to-pink-200',       iconColor: '#9333EA', Icon: FileText   },
+  { label: 'Reports',        path: '/reports',     gradient: 'bg-gradient-to-br from-indigo-100 to-indigo-200',   iconColor: '#4338CA', Icon: Users      },
+];
+import DataViz from '../components/DataViz.jsx';
 
 // ── markdown ──────────────────────────────────────────────────────────────────
 marked.setOptions({ breaks: true, gfm: true });
@@ -67,35 +80,244 @@ function newConversationId() {
   return 'conv-' + Math.random().toString(36).slice(2, 10);
 }
 
-// ── chat history sidebar ──────────────────────────────────────────────────────
-function HistoryCard({ item, onOpen }) {
-  const title = item.first_question || item.title || item.conversation_id;
+function slugifyFileName(value, fallback = 'zevra-export') {
+  return String(value || fallback)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || fallback;
+}
+
+function exportStamp() {
+  return new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+}
+
+function downloadBlob(filename, content, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function splitMarkdownRow(row) {
+  const trimmed = row.trim().replace(/^\|/, '').replace(/\|$/, '');
+  const cells = [];
+  let current = '';
+  let escaped = false;
+  for (const char of trimmed) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+    } else if (char === '\\') {
+      escaped = true;
+    } else if (char === '|') {
+      cells.push(current.trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+function isMarkdownSeparator(line) {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line || '');
+}
+
+function extractMarkdownTables(content) {
+  const lines = String(content || '').split(/\r?\n/);
+  const tables = [];
+
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    const header = lines[i];
+    const separator = lines[i + 1];
+    if (!header.includes('|') || !isMarkdownSeparator(separator)) continue;
+
+    const rows = [splitMarkdownRow(header)];
+    i += 2;
+    while (i < lines.length && lines[i].includes('|') && lines[i].trim()) {
+      rows.push(splitMarkdownRow(lines[i]));
+      i += 1;
+    }
+    i -= 1;
+
+    if (rows.length > 1) tables.push(rows);
+  }
+
+  return tables;
+}
+
+function csvEscape(value) {
+  const text = String(value ?? '').replace(/\r?\n/g, ' ');
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function tablesToCsv(tables) {
+  return tables
+    .map((table, idx) => [
+      ...(tables.length > 1 ? [`Table ${idx + 1}`] : []),
+      ...table.map((row) => row.map(csvEscape).join(',')),
+    ].join('\n'))
+    .join('\n\n');
+}
+
+function tablesToExcelHtml(tables, title) {
+  const sheets = tables.map((table, idx) => `
+    <h2>${escapeHtml(tables.length > 1 ? `Table ${idx + 1}` : title)}</h2>
+    <table>
+      ${table.map((row, rowIdx) => `
+        <tr>${row.map((cell) => rowIdx === 0
+          ? `<th>${escapeHtml(cell)}</th>`
+          : `<td>${escapeHtml(cell)}</td>`).join('')}</tr>
+      `).join('')}
+    </table>
+  `).join('<br />');
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    table { border-collapse: collapse; }
+    th, td { border: 1px solid #b7c1cc; padding: 6px 10px; }
+    th { background: #0c5847; color: #ffffff; font-weight: 700; }
+  </style>
+</head>
+<body>${sheets}</body>
+</html>`;
+}
+
+function buildConversationMarkdown(messages, title) {
+  const body = messages
+    .filter((msg) => !msg.loading)
+    .map((msg) => {
+      const heading = msg.role === 'user' ? 'User' : 'Zevra';
+      return `## ${heading}\n\n${msg.content || ''}`;
+    })
+    .join('\n\n');
+  return `# ${title}\n\nExported: ${new Date().toLocaleString()}\n\n${body}\n`;
+}
+
+function buildReportHtml(title, markdown) {
+  const html = marked.parse(markdown || '');
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(title)}</title>
+  <style>
+    body { font-family: Inter, Arial, sans-serif; color: #1a2637; margin: 40px; line-height: 1.55; }
+    h1, h2, h3 { color: #0d2438; }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }
+    th { background: #0c5847; color: white; text-align: left; padding: 8px 10px; }
+    td { border-bottom: 1px solid #e8ede8; padding: 7px 10px; }
+    tr:nth-child(even) { background: #f7faf8; }
+    pre { background: #1a2637; color: #e8edf5; padding: 12px; border-radius: 8px; overflow-x: auto; }
+    blockquote { border-left: 3px solid #0c5847; color: #415268; margin-left: 0; padding-left: 12px; }
+  </style>
+</head>
+<body>${html}</body>
+</html>`;
+}
+
+function printMarkdown(title, markdown) {
+  const win = window.open('', '_blank', 'noopener,noreferrer');
+  if (!win) return;
+  win.document.write(buildReportHtml(title, markdown));
+  win.document.close();
+  win.focus();
+  win.print();
+}
+
+function buildPowerPointHtml(title, messages) {
+  const slides = messages
+    .filter((msg) => !msg.loading)
+    .map((msg, idx) => {
+      const role = msg.role === 'user' ? 'Question' : 'Answer';
+      return `<section class="slide"><h1>${idx + 1}. ${role}</h1>${marked.parse(msg.content || '')}</section>`;
+    })
+    .join('');
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    .slide { page-break-after: always; width: 960px; min-height: 540px; padding: 48px; font-family: Arial, sans-serif; }
+    h1 { color: #0c5847; font-size: 30px; }
+    body { color: #1a2637; font-size: 20px; }
+    table { border-collapse: collapse; width: 100%; font-size: 16px; }
+    th, td { border: 1px solid #d8dee6; padding: 8px; }
+    th { background: #0c5847; color: white; }
+  </style>
+</head>
+<body><section class="slide"><h1>${escapeHtml(title)}</h1><p>Exported ${new Date().toLocaleString()}</p></section>${slides}</body>
+</html>`;
+}
+
+function ExportMenu({ open, onToggle, disabled, actions, align = 'right' }) {
   return (
-    <button
-      type="button"
-      onClick={() => onOpen(item.conversation_id)}
-      className="w-full text-left rounded-[8px] border border-[#E6E2DD] bg-white p-4 hover:bg-[#FBFAF8]"
-    >
-      <div className="flex items-start justify-between gap-3">
-        <h3 className="text-[13px] font-semibold text-[#111827] leading-snug line-clamp-2">{title}</h3>
-        <span className="text-[11px] text-[#667085] shrink-0">{timeAgo(item.last_activity)}</span>
-      </div>
-      <div className="mt-4 flex items-center gap-2">
-        {item.pinned && (
-          <span className="rounded-[6px] border border-[#DDE4E1] bg-[#F7FAF8] px-2 py-1 text-[11px] text-[#385047]">
-            Pinned
-          </span>
-        )}
-        <span className="text-[11px] text-[#667085]">{item.run_count || 0} runs</span>
-        <MoreHorizontal size={16} className="ml-auto text-[#667085]" />
-      </div>
-    </button>
+    <div className="relative">
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={disabled}
+        className="h-8 px-3 rounded-[7px] border border-[#DDE4E1] bg-white text-[12px] font-medium text-[#344054] flex items-center gap-2 hover:bg-[#F7FAF8] disabled:opacity-40 disabled:cursor-not-allowed"
+        aria-label="Export"
+      >
+        <Download size={14} />
+        Export
+      </button>
+      {open && (
+        <div className={`absolute top-9 ${align === 'left' ? 'left-0' : 'right-0'} z-20 w-56 rounded-[8px] border border-[#E6E2DD] bg-white shadow-lg py-1`}>
+          {actions.map((action) => (
+            <button
+              key={action.label}
+              type="button"
+              onClick={action.onClick}
+              disabled={action.disabled}
+              className="w-full px-3 py-2 text-left text-[13px] text-[#253248] hover:bg-[#F7FAF8] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              <action.icon size={14} className="text-[#53647C]" />
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
-function ChatHistory({ conversations, loading, error, onRefresh, onOpen }) {
+// ── Floating history panel ────────────────────────────────────────────────────
+function FloatingHistory({ conversations, loading, onOpen, onClose }) {
   const [search, setSearch] = useState('');
-  const filtered = conversations.filter((c) => {
+  const ref = useRef(null);
+
+  // Close on click outside
+  useEffect(() => {
+    const handler = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) onClose();
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [onClose]);
+
+  const filtered = safeArray(conversations).filter((c) => {
     const q = search.trim().toLowerCase();
     return !q || String(c.first_question || c.conversation_id || '').toLowerCase().includes(q);
   });
@@ -108,84 +330,282 @@ function ChatHistory({ conversations, loading, error, onRefresh, onOpen }) {
   }, {});
 
   return (
-    <aside className="hidden xl:flex w-[320px] shrink-0 flex-col bg-[#FCFBFA] border-l border-[#E7E2DD]">
-      <div className="h-[72px] px-5 flex items-center justify-between border-b border-[#E7E2DD]">
-        <h2 className="text-[15px] font-semibold text-[#111827]">History</h2>
-        <button type="button" className="text-[#667085] hover:text-[#111827]" aria-label="Close history">
-          <X size={17} />
+    <div
+      ref={ref}
+      className="fixed top-[58px] right-4 z-50 w-[310px] max-h-[72vh] flex flex-col
+                 bg-white/88 backdrop-blur-xl rounded-[18px]
+                 border border-gray-200/60
+                 shadow-[0_24px_64px_rgba(0,0,0,0.14),0_2px_8px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.8)]
+                 overflow-hidden"
+    >
+      {/* Header */}
+      <div className="px-4 py-3 border-b border-gray-100/80 flex items-center justify-between flex-shrink-0">
+        <div className="flex items-center gap-2">
+          <Clock size={13} className="text-emerald-500" />
+          <span className="text-[13px] font-semibold text-[#111827]">History</span>
+        </div>
+        <button
+          onClick={onClose}
+          className="w-6 h-6 rounded-md flex items-center justify-center text-gray-400
+                     hover:text-gray-600 hover:bg-gray-100 transition-colors"
+        >
+          <X size={13} />
         </button>
       </div>
 
-      <div className="p-4 border-b border-[#EEEAE5]">
+      {/* Search */}
+      <div className="px-3 py-2.5 border-b border-gray-100/60 flex-shrink-0">
         <div className="relative">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#667085]" />
+          <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-300" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="h-9 w-full rounded-[7px] border border-[#DDD8D2] bg-white pl-9 pr-3 text-[13px] outline-none focus:border-[#0B624F]"
-            placeholder="Search conversations..."
+            placeholder="Search conversations…"
+            className="w-full h-[30px] rounded-[8px] bg-gray-100/80 pl-7 pr-3
+                       text-[12.5px] text-[#111827] outline-none border border-transparent
+                       focus:border-emerald-400 focus:bg-white/80 transition-all
+                       placeholder:text-gray-300"
           />
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
-        {loading && <p className="text-[13px] text-[#667085]">Loading…</p>}
-        {!loading && error && <p className="text-[13px] text-red-700">{error}</p>}
-        {!loading && !error && filtered.length === 0 && (
-          <p className="text-[13px] text-[#667085]">No conversations yet.</p>
+      {/* List */}
+      <div className="overflow-y-auto flex-1 px-2 py-2">
+        {loading && (
+          <div className="py-8 text-center text-[12px] text-gray-400">Loading…</div>
+        )}
+        {!loading && filtered.length === 0 && (
+          <div className="py-8 text-center">
+            <div className="text-[12px] text-gray-400">No conversations yet</div>
+            <div className="text-[11px] text-gray-300 mt-1">Ask your first question to start</div>
+          </div>
         )}
         {['Today', 'Yesterday', 'Earlier'].map((label) =>
           grouped[label]?.length ? (
-            <section key={label}>
-              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#8A96A6]">{label}</div>
-              <div className="space-y-2">
+            <div key={label} className="mb-3">
+              <div className="px-2 mb-1 text-[10px] font-semibold uppercase tracking-[0.07em] text-gray-300">
+                {label}
+              </div>
+              <div className="space-y-px">
                 {grouped[label].map((item) => (
-                  <HistoryCard key={item.conversation_id} item={item} onOpen={onOpen} />
+                  <button
+                    key={item.conversation_id}
+                    type="button"
+                    onClick={() => { onOpen(item.conversation_id); onClose(); }}
+                    className="w-full text-left rounded-[10px] px-3 py-2.5
+                               hover:bg-gray-100/70 active:bg-gray-200/60 transition-colors group"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="text-[12.5px] font-medium text-[#111827] line-clamp-1 leading-snug">
+                        {item.first_question || item.title || 'Investigation'}
+                      </span>
+                      <span className="text-[10.5px] text-gray-400 shrink-0 mt-px">
+                        {timeAgo(item.last_activity)}
+                      </span>
+                    </div>
+                    {item.run_count > 0 && (
+                      <span className="text-[11px] text-gray-400 mt-0.5 block">
+                        {item.run_count} {item.run_count === 1 ? 'run' : 'runs'}
+                      </span>
+                    )}
+                  </button>
                 ))}
               </div>
-            </section>
+            </div>
           ) : null
         )}
       </div>
-    </aside>
+    </div>
+  );
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+function fmtCell(v) {
+  if (v == null) return '—';
+  const n = parseFloat(v);
+  if (!isNaN(n) && isFinite(v)) {
+    if (Math.abs(n) >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+    if (Math.abs(n) >= 1_000)     return n.toLocaleString();
+    return Number.isInteger(n) ? n.toLocaleString() : parseFloat(n.toFixed(4)).toString();
+  }
+  return String(v);
+}
+
+function colLabel(key) {
+  return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// ── DataTable ─────────────────────────────────────────────────────────────────
+
+function DataTable({ rows }) {
+  if (!rows?.length) return null;
+  const cols = Object.keys(rows[0]);
+  return (
+    <div className="mt-4 rounded-xl border border-gray-200 overflow-hidden">
+      <div className="overflow-x-auto">
+        <div className="max-h-[260px] overflow-y-auto">
+          <table className="w-full text-[12px] border-collapse">
+            <thead className="sticky top-0 z-10">
+              <tr>
+                {cols.map(col => (
+                  <th key={col}
+                      className="bg-[#0C5847] px-3.5 py-2.5 text-left text-[11px] font-semibold text-white/90 tracking-wide whitespace-nowrap">
+                    {colLabel(col)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, i) => (
+                <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-[#f8faf9]'}>
+                  {cols.map(col => (
+                    <td key={col}
+                        className="px-3.5 py-2 text-[#344054] border-t border-gray-100 whitespace-nowrap max-w-[220px] truncate">
+                      {fmtCell(row[col])}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div className="px-3.5 py-1.5 bg-gray-50 border-t border-gray-200 text-[11px] text-gray-400">
+        {rows.length.toLocaleString()} row{rows.length !== 1 ? 's' : ''}
+      </div>
+    </div>
+  );
+}
+
+// ── SuggestedQuestions ────────────────────────────────────────────────────────
+
+function buildSuggestions(quickRefinements, queryData) {
+  const chips = [];
+
+  // Data-driven: detect useful follow-ups from column patterns
+  if (queryData?.length > 0) {
+    const cols = Object.keys(queryData[0]);
+    const statusCol = cols.find(c => /status|state|type/i.test(c));
+    const numCol    = cols.find(c => {
+      const vals = queryData.map(r => r[c]).filter(v => v != null);
+      return vals.length > 0 && vals.every(v => !isNaN(parseFloat(v)));
+    });
+    const dateCol   = cols.find(c => /date|_at|time|month|year/i.test(c));
+
+    if (statusCol) {
+      const statuses = [...new Set(queryData.map(r => r[statusCol]).filter(Boolean))].slice(0, 2);
+      if (statuses.length) chips.push({ label: `Filter: ${statuses[0]}`, prompt: `Show only records where ${colLabel(statusCol)} is ${statuses[0]}` });
+    }
+    if (numCol)  chips.push({ label: `Total ${colLabel(numCol)}`, prompt: `What is the total ${colLabel(numCol)}?` });
+    if (dateCol && !chips.find(c => c.label.startsWith('Total')))
+      chips.push({ label: 'Trend over time', prompt: `Show the trend by month` });
+  }
+
+  // Backend refinements (exclude "Run in background" — too technical)
+  safeArray(quickRefinements)
+    .filter(r => !String(r.prompt || '').startsWith('/async'))
+    .slice(0, 2)
+    .forEach(r => chips.push({ label: r.label, prompt: r.prompt }));
+
+  // Deduplicate and cap at 3
+  const seen = new Set();
+  return chips.filter(c => { if (seen.has(c.label)) return false; seen.add(c.label); return true; }).slice(0, 3);
+}
+
+function SuggestedQuestions({ quickRefinements, queryData, onAsk }) {
+  const chips = useMemo(() => buildSuggestions(quickRefinements, queryData), [quickRefinements, queryData]);
+  if (!chips.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5 mt-3 pt-3 border-t border-[#F0EDE8]">
+      <span className="text-[10px] font-semibold text-gray-300 uppercase tracking-wider self-center mr-0.5">
+        Ask next
+      </span>
+      {chips.map((c, i) => (
+        <button key={i} onClick={() => onAsk(c.prompt)}
+          className="px-2.5 py-1 text-[11px] font-medium rounded-full border border-[#D1E9E2] bg-[#f0faf5] text-[#0C5847] hover:bg-[#0C5847] hover:text-white hover:border-[#0C5847] transition-all">
+          {c.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
 // ── message bubbles ────────────────────────────────────────────────────────────
-function UserMessage({ text }) {
+// ── Attachment type icon + colour ─────────────────────────────────────────────
+const ATTACHMENT_STYLE = {
+  IMAGE:    { icon: '🖼️',  label: 'Image',    bg: 'bg-purple-50  border-purple-200',  text: 'text-purple-700' },
+  TABULAR:  { icon: '📊',  label: 'Spreadsheet', bg: 'bg-green-50  border-green-200',  text: 'text-green-700'  },
+  DOCUMENT: { icon: '📄',  label: 'Document', bg: 'bg-blue-50    border-blue-200',    text: 'text-blue-700'   },
+  TEXT:     { icon: '📝',  label: 'Text file',bg: 'bg-gray-50    border-gray-200',    text: 'text-gray-600'   },
+};
+
+function AttachmentChip({ attachment, onRemove }) {
+  if (!attachment) return null;
+  const s = ATTACHMENT_STYLE[attachment.type] ?? ATTACHMENT_STYLE.TEXT;
+  return (
+    <div className={`flex items-center gap-2 px-3 py-2 rounded-[10px] border text-[12.5px]
+                     font-medium ${s.bg} ${s.text} max-w-[360px]`}>
+      {attachment.thumbnail ? (
+        <img src={`data:image/jpeg;base64,${attachment.thumbnail}`}
+             alt="preview" className="w-8 h-8 rounded-[6px] object-cover flex-shrink-0" />
+      ) : (
+        <span className="text-[16px] flex-shrink-0">{s.icon}</span>
+      )}
+      <span className="truncate flex-1">{attachment.fileName}</span>
+      {onRemove && (
+        <button onClick={onRemove}
+          className="flex-shrink-0 ml-1 text-current opacity-50 hover:opacity-100 transition-opacity">
+          <X size={12} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function UserMessage({ text, attachment }) {
   return (
     <div className="flex justify-end">
-      <div className="flex items-start gap-3 max-w-[80%]">
-        <div className="rounded-[14px] bg-[#0C5847] px-5 py-3.5 text-[14px] leading-[1.6] text-white">
-          {text}
-        </div>
-        <div className="mt-1 w-8 h-8 rounded-full bg-[#E8EBF0] flex items-center justify-center shrink-0">
-          <User size={15} className="text-[#415268]" />
+      <div className="flex flex-col items-end gap-1.5 max-w-[78%]">
+        {attachment && <AttachmentChip attachment={attachment} />}
+        <div className="flex items-start gap-2.5">
+          <div className="rounded-[12px] bg-[#0C5847] px-4 py-2.5 text-[13px] leading-[1.55] text-white">
+            {text}
+          </div>
+          <div className="mt-0.5 w-7 h-7 rounded-full bg-[#E8EBF0] flex items-center justify-center shrink-0">
+            <User size={13} className="text-[#415268]" />
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-function AssistantMessage({ content, decisionType, loading }) {
+function AssistantMessage({ content, decisionType, loading, exportMenu, queryData, quickRefinements, onAsk }) {
   return (
     <div className="flex justify-start">
-      <div className="flex items-start gap-3 max-w-[90%]">
-        <div className="mt-1 w-8 h-8 rounded-full bg-[#0C5847]/10 flex items-center justify-center shrink-0">
-          <Bot size={15} className="text-[#0C5847]" />
+      <div className="flex items-start gap-2.5 w-full">
+        <div className="mt-0.5 w-7 h-7 rounded-full bg-[#0C5847]/10 flex items-center justify-center shrink-0">
+          <Bot size={13} className="text-[#0C5847]" />
         </div>
-        <div className="rounded-[14px] border border-[#E8EBF0] bg-white px-6 py-5 shadow-sm">
+        <div className="flex-1 min-w-0 rounded-[12px] border border-[#E8EBF0] bg-white px-5 py-4 shadow-sm">
           {loading ? (
-            <div className="flex items-center gap-2 text-[13px] text-[#667085]">
+            <div className="flex items-center gap-2 text-[12px] text-[#667085]">
               <span className="animate-pulse">Zevra is thinking…</span>
             </div>
           ) : (
             <>
+              <div className="mb-2 flex justify-end">
+                {exportMenu}
+              </div>
               <MarkdownBody content={content} />
+              {queryData?.length > 0 && <DataTable rows={queryData} />}
+              {queryData?.length > 0 && <DataViz queryData={queryData} />}
+              <SuggestedQuestions quickRefinements={quickRefinements} queryData={queryData} onAsk={onAsk} />
               {decisionType && (
-                <div className="mt-3 pt-3 border-t border-[#F0EDE8] flex items-center gap-1.5">
-                  <span className="text-[11px] text-[#8A96A6]">via</span>
-                  <span className="text-[11px] font-medium text-[#0C5847]">{decisionType}</span>
+                <div className="mt-2.5 pt-2.5 border-t border-[#F0EDE8] flex items-center gap-1.5">
+                  <span className="text-[10px] text-[#8A96A6]">via</span>
+                  <span className="text-[10px] font-medium text-[#0C5847]">{decisionType}</span>
                 </div>
               )}
             </>
@@ -196,13 +616,249 @@ function AssistantMessage({ content, decisionType, loading }) {
   );
 }
 
+// ── Pin as Report modal ───────────────────────────────────────────────────────
+function PinReportModal({ conversationTitle, messages, user, onClose }) {
+  const questions = messages
+    .filter((m) => m.role === 'user' && m.content?.trim())
+    .map((m) => m.content.trim());
+
+  const [name,         setName]         = useState(conversationTitle.slice(0, 80));
+  const [scheduleType, setScheduleType] = useState('DAILY');
+  const [scheduleTime, setScheduleTime] = useState('09:00');
+  const [channel,      setChannel]      = useState('EMAIL');
+  const [emailTo,      setEmailTo]      = useState(user?.email || '');
+  const [slackWebhook, setSlackWebhook] = useState('');
+  const [saving,       setSaving]       = useState(false);
+  const [error,        setError]        = useState('');
+  const [done,         setDone]         = useState(false);
+
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!name.trim() || questions.length === 0) return;
+    setSaving(true);
+    setError('');
+    try {
+      await api.reports.create({
+        name:         name.trim(),
+        questions,
+        scheduleType,
+        scheduleTime,
+        timezone:     tz,
+        channel,
+        emailTo:      (channel === 'EMAIL' || channel === 'BOTH') ? emailTo.trim() : null,
+        slackWebhook: (channel === 'SLACK' || channel === 'BOTH') ? slackWebhook.trim() : null,
+      });
+      setDone(true);
+      setTimeout(onClose, 1800);
+    } catch (err) {
+      setError(err.message || 'Failed to schedule report');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const needsEmail = channel === 'EMAIL' || channel === 'BOTH';
+  const needsSlack = channel === 'SLACK' || channel === 'BOTH';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+         onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="w-full max-w-[420px] mx-4 bg-white rounded-[20px] border border-gray-200/80
+                      shadow-[0_24px_64px_rgba(0,0,0,0.18)] overflow-hidden">
+
+        {/* Header */}
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-[10px] bg-emerald-50 flex items-center justify-center">
+              <CalendarClock size={15} className="text-emerald-600" />
+            </div>
+            <div>
+              <h2 className="text-[14px] font-semibold text-[#111827] leading-tight">Schedule as Report</h2>
+              <p className="text-[11px] text-gray-400 mt-0.5">
+                {questions.length} question{questions.length !== 1 ? 's' : ''} from this conversation
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose}
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400
+                       hover:text-gray-600 hover:bg-gray-100 transition-colors">
+            <X size={14} />
+          </button>
+        </div>
+
+        {done ? (
+          <div className="px-6 py-14 text-center">
+            <div className="w-12 h-12 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-3">
+              <CalendarClock size={22} className="text-emerald-600" />
+            </div>
+            <p className="text-[14px] font-semibold text-[#111827]">Report scheduled!</p>
+            <p className="text-[12px] text-gray-400 mt-1">Manage it anytime from the Reports page.</p>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4">
+
+            {/* Name */}
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">
+                Report name
+              </label>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+                className="w-full h-9 rounded-[8px] border border-gray-200 px-3 text-[13px] text-[#111827]
+                           focus:outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400/20 transition-all"
+              />
+            </div>
+
+            {/* Frequency */}
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">
+                Run
+              </label>
+              <div className="flex gap-1.5">
+                {['DAILY', 'WEEKLY', 'MONTHLY'].map((t) => (
+                  <button key={t} type="button" onClick={() => setScheduleType(t)}
+                    className={`flex-1 h-8 rounded-[8px] text-[12px] font-medium border transition-all
+                      ${scheduleType === t
+                        ? 'bg-[#0C5847] text-white border-[#0C5847]'
+                        : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300 hover:bg-gray-50'}`}>
+                    {t.charAt(0) + t.slice(1).toLowerCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Time */}
+            <div className="flex items-center gap-3">
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">
+                  At
+                </label>
+                <input
+                  type="time"
+                  value={scheduleTime}
+                  onChange={(e) => setScheduleTime(e.target.value)}
+                  className="h-9 rounded-[8px] border border-gray-200 px-3 text-[13px] text-[#111827]
+                             focus:outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400/20 transition-all"
+                />
+              </div>
+              <div className="mt-5 text-[12px] text-gray-400">{tz}</div>
+            </div>
+
+            {/* Channel */}
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">
+                Deliver via
+              </label>
+              <div className="flex gap-1.5">
+                {[['EMAIL', 'Email'], ['SLACK', 'Slack'], ['BOTH', 'Both']].map(([val, label]) => (
+                  <button key={val} type="button" onClick={() => setChannel(val)}
+                    className={`flex-1 h-8 rounded-[8px] text-[12px] font-medium border transition-all
+                      ${channel === val
+                        ? 'bg-[#0C5847] text-white border-[#0C5847]'
+                        : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300 hover:bg-gray-50'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Email recipients */}
+            {needsEmail && (
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">
+                  Email
+                </label>
+                <input
+                  type="email"
+                  value={emailTo}
+                  onChange={(e) => setEmailTo(e.target.value)}
+                  placeholder="recipient@company.com"
+                  required={needsEmail}
+                  className="w-full h-9 rounded-[8px] border border-gray-200 px-3 text-[13px] text-[#111827]
+                             focus:outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400/20 transition-all"
+                />
+              </div>
+            )}
+
+            {/* Slack webhook */}
+            {needsSlack && (
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">
+                  Slack webhook URL
+                </label>
+                <input
+                  value={slackWebhook}
+                  onChange={(e) => setSlackWebhook(e.target.value)}
+                  placeholder="https://hooks.slack.com/services/…"
+                  required={needsSlack}
+                  className="w-full h-9 rounded-[8px] border border-gray-200 px-3 text-[13px] text-[#111827]
+                             focus:outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400/20 transition-all"
+                />
+              </div>
+            )}
+
+            {/* Questions preview */}
+            <div className="rounded-[8px] bg-gray-50 border border-gray-100 px-3 py-2.5">
+              <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">
+                Questions to run
+              </p>
+              <div className="space-y-1 max-h-[72px] overflow-y-auto">
+                {questions.map((q, i) => (
+                  <p key={i} className="text-[12px] text-gray-600 line-clamp-1">
+                    <span className="text-gray-300 mr-1.5">{i + 1}.</span>{q}
+                  </p>
+                ))}
+              </div>
+            </div>
+
+            {error && <p className="text-[12px] text-red-500">{error}</p>}
+
+            {/* Actions */}
+            <div className="flex gap-2.5 pt-0.5">
+              <button type="button" onClick={onClose}
+                className="flex-1 h-9 rounded-[8px] border border-gray-200 text-[13px] font-medium
+                           text-gray-600 hover:bg-gray-50 transition-colors">
+                Cancel
+              </button>
+              <button type="submit" disabled={saving || !name.trim() || questions.length === 0}
+                className="flex-1 h-9 rounded-[8px] bg-[#0C5847] text-white text-[13px] font-medium
+                           hover:bg-[#084B3D] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2">
+                {saving ? (
+                  <><span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full" />Scheduling…</>
+                ) : (
+                  <><CalendarClock size={13} />Schedule Report</>
+                )}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── main component ────────────────────────────────────────────────────────────
-export default function Chat() {
+export default function Chat({ prefillQuestion = null, onPrefillUsed = null }) {
   const { user } = useAuth();
 
   // landing state
   const [landingQuery, setLandingQuery] = useState('');
   const [metrics, setMetrics] = useState({ connections: null, documents: null, agents: null });
+  const [suggestedQuestions, setSuggestedQuestions] = useState([]);
+
+  // history floating panel
+  const [historyOpen,    setHistoryOpen]    = useState(false);
+  const [pinReportOpen,  setPinReportOpen]  = useState(false);
+
+  // attachment (file upload / image paste)
+  const [attachment,        setAttachment]        = useState(null);   // { key, fileName, type, thumbnail, summary }
+  const [attachmentLoading, setAttachmentLoading] = useState(false);
+  const [attachmentError,   setAttachmentError]   = useState('');
+  const fileInputRef = useRef(null);
 
   // chat state
   const [chatMode, setChatMode] = useState(false);
@@ -211,6 +867,7 @@ export default function Chat() {
   const [chatQuery, setChatQuery] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
+  const [openExportMenu, setOpenExportMenu] = useState(null);
 
   // history
   const [conversations, setConversations] = useState([]);
@@ -244,6 +901,76 @@ export default function Chat() {
     }
   }, []);
 
+  // Fetch suggested questions from onboarding status
+  useEffect(() => {
+    api.onboarding.status()
+      .then(s => { if (s.suggested_questions?.length) setSuggestedQuestions(s.suggested_questions); })
+      .catch(() => {});
+  }, []);
+
+  // ── Attachment helpers ─────────────────────────────────────────────────────
+  const uploadFile = useCallback(async (file) => {
+    if (!file) return;
+    setAttachmentError('');
+    setAttachmentLoading(true);
+    try {
+      const res = await api.attachments.upload(file, conversationIdRef.current);
+      setAttachment({
+        key:       res.attachment_key,
+        fileName:  res.file_name,
+        type:      res.attachment_type,
+        thumbnail: res.thumbnail_base64,   // base64 JPEG thumbnail (images only)
+        summary:   res.summary,
+        mimeType:  res.mime_type,
+      });
+    } catch (e) {
+      setAttachmentError(e.message || 'Upload failed');
+    } finally {
+      setAttachmentLoading(false);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const clearAttachment = useCallback(() => {
+    setAttachment(null);
+    setAttachmentError('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }, []);
+
+  // Capture Ctrl+V / Command+V image paste anywhere in the chat input area
+  const handlePaste = useCallback((e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) uploadFile(file);
+        return;
+      }
+    }
+  }, [uploadFile]);
+
+  const prefillFiredRef = useRef(false);
+
+  // Auto-fire prefilled question from onboarding wizard completion.
+  // Guard with a ref so React StrictMode's double-invoke doesn't send it twice.
+  useEffect(() => {
+    if (prefillQuestion && !prefillFiredRef.current) {
+      prefillFiredRef.current = true;
+      onPrefillUsed?.();
+      sendQuestion(prefillQuestion, true);
+      return;
+    }
+    // Pick up cross-page prefill stored by Knowledge Graph "Ask Zevra" button
+    const stored = localStorage.getItem('zevra_chat_prefill');
+    if (stored && !prefillFiredRef.current) {
+      prefillFiredRef.current = true;
+      localStorage.removeItem('zevra_chat_prefill');
+      sendQuestion(stored, true);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     loadConversations();
     (async () => {
@@ -264,7 +991,7 @@ export default function Chat() {
 
   // ── submit question ─────────────────────────────────────────────────────────
   const sendQuestion = async (question, isNewConv = false) => {
-    if (!question?.trim() || submitting) return;
+    if ((!question?.trim() && !attachment) || submitting) return;
 
     // Always reuse the existing conversationId unless explicitly starting a new chat
     if (isNewConv || !conversationIdRef.current) {
@@ -272,9 +999,22 @@ export default function Chat() {
     }
     const activeConvId = conversationIdRef.current;
 
-    // Enter chat mode and add user message
+    // Capture and clear attachment before any state updates
+    const currentAttachment = attachment;
+    if (attachment) clearAttachment();
+
+    // Enter chat mode and add user message (with attachment preview if present)
     if (!chatMode) setChatMode(true);
-    setMessages((prev) => [...prev, { role: 'user', content: question }]);
+    setMessages((prev) => [...prev, {
+      role: 'user',
+      content: question,
+      attachment: currentAttachment ? {
+        fileName:  currentAttachment.fileName,
+        type:      currentAttachment.type,
+        thumbnail: currentAttachment.thumbnail,
+        summary:   currentAttachment.summary,
+      } : null,
+    }]);
 
     // Add loading placeholder
     setMessages((prev) => [...prev, { role: 'assistant', content: '', loading: true }]);
@@ -286,7 +1026,8 @@ export default function Chat() {
       const response = await api.chat.ask({
         question,
         conversation_id: activeConvId,
-        agent_key: null,
+        agent_key:       null,
+        attachment_key:  currentAttachment?.key ?? null,
       });
 
       setMessages((prev) => {
@@ -296,6 +1037,8 @@ export default function Chat() {
           role: 'assistant',
           content: response.answer || response.error || 'No response received.',
           decisionType: response.decision?.type || response.decision_type,
+          queryData: response.query_data || response.queryData || null,
+          quickRefinements: response.quick_refinements || response.quickRefinements || [],
           loading: false,
         };
         return next;
@@ -320,7 +1063,7 @@ export default function Chat() {
 
   const handleLandingSubmit = (e) => {
     e.preventDefault();
-    const q = landingQuery.trim();
+    const q = landingQuery.trim() || (attachment ? 'Please analyse this attached file.' : '');
     if (!q) return;
     setLandingQuery('');
     sendQuestion(q, true);   // isNewConv=true: generate a fresh conversation ID
@@ -363,95 +1106,267 @@ export default function Chat() {
     setLandingQuery('');
     setChatQuery('');
     setSubmitError('');
+    setOpenExportMenu(null);
   };
 
   const metricText = (val, noun) => val === null ? `Loading ${noun}` : `${val} ${noun}`;
+  const conversationTitle = messages.find((m) => m.role === 'user')?.content?.slice(0, 60) || 'Investigation';
+  const conversationFileBase = `${slugifyFileName(conversationTitle, 'zevra-investigation')}-${exportStamp()}`;
+
+  const exportAnswerActions = (message, index) => {
+    const tables = extractMarkdownTables(message.content);
+    const answerBase = `zevra-answer-${index + 1}-${exportStamp()}`;
+    return [
+      {
+        label: 'Copy answer',
+        icon: Clipboard,
+        onClick: async () => {
+          await navigator.clipboard?.writeText(message.content || '');
+          setOpenExportMenu(null);
+        },
+      },
+      {
+        label: 'Download answer (.md)',
+        icon: FileText,
+        onClick: () => {
+          downloadBlob(`${answerBase}.md`, message.content || '', 'text/markdown;charset=utf-8');
+          setOpenExportMenu(null);
+        },
+      },
+      {
+        label: 'Download table CSV',
+        icon: FileSpreadsheet,
+        disabled: tables.length === 0,
+        onClick: () => {
+          downloadBlob(`${answerBase}-tables.csv`, tablesToCsv(tables), 'text/csv;charset=utf-8');
+          setOpenExportMenu(null);
+        },
+      },
+      {
+        label: 'Download table Excel',
+        icon: FileSpreadsheet,
+        disabled: tables.length === 0,
+        onClick: () => {
+          downloadBlob(`${answerBase}-tables.xls`, tablesToExcelHtml(tables, 'Zevra answer tables'), 'application/vnd.ms-excel;charset=utf-8');
+          setOpenExportMenu(null);
+        },
+      },
+      {
+        label: 'Print / save PDF',
+        icon: Printer,
+        onClick: () => {
+          printMarkdown('Zevra answer', message.content || '');
+          setOpenExportMenu(null);
+        },
+      },
+    ];
+  };
+
+  const exportConversationActions = () => {
+    const markdown = buildConversationMarkdown(messages, conversationTitle);
+    const assistantTables = messages
+      .filter((msg) => msg.role === 'assistant' && !msg.loading)
+      .flatMap((msg) => extractMarkdownTables(msg.content));
+    return [
+      {
+        label: 'Download report (.md)',
+        icon: FileText,
+        onClick: () => {
+          downloadBlob(`${conversationFileBase}.md`, markdown, 'text/markdown;charset=utf-8');
+          setOpenExportMenu(null);
+        },
+      },
+      {
+        label: 'Download report HTML',
+        icon: FileDown,
+        onClick: () => {
+          downloadBlob(`${conversationFileBase}.html`, buildReportHtml(conversationTitle, markdown), 'text/html;charset=utf-8');
+          setOpenExportMenu(null);
+        },
+      },
+      {
+        label: 'Download all tables CSV',
+        icon: FileSpreadsheet,
+        disabled: assistantTables.length === 0,
+        onClick: () => {
+          downloadBlob(`${conversationFileBase}-tables.csv`, tablesToCsv(assistantTables), 'text/csv;charset=utf-8');
+          setOpenExportMenu(null);
+        },
+      },
+      {
+        label: 'Download all tables Excel',
+        icon: FileSpreadsheet,
+        disabled: assistantTables.length === 0,
+        onClick: () => {
+          downloadBlob(`${conversationFileBase}-tables.xls`, tablesToExcelHtml(assistantTables, conversationTitle), 'application/vnd.ms-excel;charset=utf-8');
+          setOpenExportMenu(null);
+        },
+      },
+      {
+        label: 'PowerPoint outline',
+        icon: FileDown,
+        onClick: () => {
+          downloadBlob(`${conversationFileBase}.ppt`, buildPowerPointHtml(conversationTitle, messages), 'application/vnd.ms-powerpoint;charset=utf-8');
+          setOpenExportMenu(null);
+        },
+      },
+      {
+        label: 'Print / save PDF',
+        icon: Printer,
+        onClick: () => {
+          printMarkdown(conversationTitle, markdown);
+          setOpenExportMenu(null);
+        },
+      },
+    ];
+  };
 
   // ── render ──────────────────────────────────────────────────────────────────
   return (
-    <div className="h-full flex overflow-hidden bg-[#FBFAF8]">
+    <div className="h-full flex overflow-hidden bg-transparent">
       <section className="flex-1 min-w-0 flex flex-col overflow-hidden">
 
         {/* ── LANDING VIEW ── */}
         {!chatMode && (
-          <>
-            <header className="h-[72px] shrink-0 border-b border-[#E7E2DD] bg-white/80 backdrop-blur px-8 flex items-center justify-end gap-4">
-              <span className="h-8 rounded-full border border-[#DDE4E1] bg-white px-3.5 flex items-center gap-2 text-[12px] font-medium text-[#253248]">
-                <span className="h-1.5 w-1.5 rounded-full bg-[#1FB981]" />
-                {envLabel()}
-              </span>
-            </header>
+          <div className="flex-1 flex flex-col items-center justify-center px-6 overflow-y-auto">
+            {/* Greeting */}
+            <h1 className="text-[32px] font-bold text-[#111827] tracking-[-0.03em] text-center mb-2">
+              Good morning, {firstName(user)}.
+            </h1>
+            <p className="text-[15px] text-[#9CA3AF] text-center mb-8">
+              What would you like to investigate today?
+            </p>
 
-            <main className="flex-1 flex items-center justify-center px-8 overflow-y-auto">
-              <div className="w-full max-w-[700px] -mt-8">
-                <div className="text-center mb-10">
-                  <h1 className="font-serif text-[40px] leading-tight tracking-[-0.02em] text-[#101828]">
-                    Good morning, {firstName(user)}.
-                  </h1>
-                  <p className="mt-2.5 text-[15px] text-[#46566D]">
-                    Ask across your enterprise systems and approved memory.
-                  </p>
-                </div>
-
-                <form
-                  onSubmit={handleLandingSubmit}
-                  className="rounded-[14px] border border-[#DDD8D2] bg-white shadow-[0_18px_60px_rgba(16,24,40,0.09)]"
-                >
-                  <textarea
-                    value={landingQuery}
-                    onChange={(e) => setLandingQuery(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        handleLandingSubmit(e);
-                      }
-                    }}
-                    placeholder="What would you like to investigate?"
-                    rows={4}
-                    className="w-full resize-none rounded-t-[14px] bg-transparent px-7 pt-6 pb-2 text-[15px] text-[#101828] outline-none placeholder:text-[#9AA6B5]"
-                  />
-                  <div className="px-6 pb-5 flex items-center justify-between">
-                    <div className="flex items-center gap-1.5 text-[12px] text-[#667085]">
-                      <Sparkles size={14} className="text-[#53647C]" />
-                      Press Enter to send
+            {/* Search box */}
+            <form onSubmit={handleLandingSubmit} className="w-full max-w-[640px] mb-4">
+              {/* Attachment preview row */}
+              {(attachment || attachmentLoading || attachmentError) && (
+                <div className="mb-2 px-1">
+                  {attachmentLoading && (
+                    <div className="flex items-center gap-2 text-[12.5px] text-gray-400">
+                      <span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-emerald-400 border-t-transparent rounded-full" />
+                      Uploading file…
                     </div>
-                    <button
-                      type="submit"
-                      disabled={submitting || !landingQuery.trim()}
-                      className="h-9 px-4 rounded-full bg-[#0C5847] text-white text-[13px] font-medium flex items-center gap-2 hover:bg-[#084B3D] disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      <Send size={14} />
-                      Investigate
-                    </button>
-                  </div>
-                </form>
-
-                <div className="mt-9 flex items-center justify-center gap-8 text-[13px] font-medium text-[#415268]">
-                  <div className="flex items-center gap-2.5">
-                    <Database size={17} strokeWidth={1.7} />
-                    {metricText(metrics.connections, 'systems')}
-                  </div>
-                  <div className="h-5 w-px bg-[#DDD8D2]" />
-                  <div className="flex items-center gap-2.5">
-                    <FileText size={17} strokeWidth={1.7} />
-                    {metricText(metrics.documents, 'documents')}
-                  </div>
-                  <div className="h-5 w-px bg-[#DDD8D2]" />
-                  <div className="flex items-center gap-2.5">
-                    <Users size={17} strokeWidth={1.7} />
-                    {metricText(metrics.agents, 'agents')}
-                  </div>
+                  )}
+                  {attachmentError && !attachmentLoading && (
+                    <div className="flex items-center gap-2 text-[12px] text-red-500">
+                      <X size={12} className="flex-shrink-0" />
+                      <span className="flex-1">{attachmentError}</span>
+                      <button type="button" onClick={() => setAttachmentError('')}
+                        className="underline text-red-400 hover:text-red-600">Dismiss</button>
+                    </div>
+                  )}
+                  {attachment && !attachmentLoading && (
+                    <AttachmentChip attachment={attachment} onRemove={clearAttachment} />
+                  )}
                 </div>
+              )}
+              <div className="flex items-center gap-3 bg-white/80 backdrop-blur-sm rounded-[16px]
+                              border border-gray-200/80 px-4 py-3.5
+                              shadow-[0_4px_24px_rgba(0,0,0,0.07)]
+                              focus-within:border-emerald-400
+                              focus-within:shadow-[0_4px_24px_rgba(0,0,0,0.07),0_0_0_3px_rgba(5,150,105,0.10)]
+                              transition-all">
+                <Sparkles size={18} className="text-emerald-500 flex-shrink-0" />
+                <input
+                  value={landingQuery}
+                  onChange={(e) => setLandingQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleLandingSubmit(e);
+                    }
+                  }}
+                  onPaste={handlePaste}
+                  placeholder="Ask anything about your business — sales, operations, finance, patients, bookings…"
+                  className="flex-1 bg-transparent text-[15px] text-[#111827] outline-none placeholder:text-[#C4C9D4]"
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={attachmentLoading}
+                  title="Attach a file or paste an image (PDF, Excel, CSV, image, text — up to 20 MB)"
+                  className="flex-shrink-0 text-gray-400 hover:text-emerald-600 transition-colors disabled:opacity-40"
+                >
+                  <Paperclip size={17} />
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting || (!landingQuery.trim() && !attachment)}
+                  className="w-[34px] h-[34px] bg-[#111827] rounded-[9px] flex items-center justify-center
+                             flex-shrink-0 hover:bg-[#1F2937] disabled:opacity-40
+                             disabled:cursor-not-allowed transition-colors"
+                >
+                  <Send size={13} className="text-white" />
+                </button>
               </div>
-            </main>
-          </>
+            </form>
+
+            {/* Suggestion chips — from onboarding */}
+            {suggestedQuestions.length > 0 && (
+              <div className="flex flex-wrap gap-2 justify-center max-w-[640px] mb-10">
+                {suggestedQuestions.map((q, i) => (
+                  <button key={i} onClick={() => setLandingQuery(q)}
+                    className="px-3.5 py-1.5 bg-white/70 backdrop-blur-sm border border-gray-200
+                               rounded-full text-[12.5px] text-gray-600
+                               hover:bg-emerald-50 hover:border-emerald-300 hover:text-emerald-700
+                               transition-all">
+                    {q}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Quick access tiles */}
+            <p className="text-[10.5px] font-semibold text-gray-300 uppercase tracking-[0.09em] mb-4">
+              Quick access
+            </p>
+            <div className="grid grid-cols-6 gap-2.5 w-full max-w-[640px]">
+              {QUICK_TILES.map(({ label, path, gradient, iconColor, Icon }) => (
+                <button
+                  key={path}
+                  onClick={() => navigate(path)}
+                  className="flex flex-col items-center gap-2 py-[18px] px-2
+                             bg-white/70 backdrop-blur-sm border border-gray-100/80
+                             rounded-[14px] hover:border-gray-200/80
+                             hover:shadow-[0_6px_20px_rgba(0,0,0,0.09)]
+                             hover:-translate-y-[2px] transition-all group"
+                >
+                  <div className={`w-[44px] h-[44px] rounded-[12px] flex items-center justify-center
+                                  group-hover:scale-[1.06] transition-transform ${gradient}`}>
+                    <Icon size={22} style={{ color: iconColor }} strokeWidth={1.6} />
+                  </div>
+                  <span className="text-[11.5px] font-medium text-gray-600 text-center leading-tight">
+                    {label}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            {/* Status + history shortcut */}
+            <div className="flex items-center gap-4 mt-10 text-[11.5px] text-gray-300">
+              <span className="flex items-center gap-1.5">
+                <span className="w-[5px] h-[5px] bg-emerald-500 rounded-full" />
+                {metricText(metrics.connections, 'connections')}
+              </span>
+              <span>·</span>
+              <span>{metricText(metrics.agents, 'agents active')}</span>
+              <span>·</span>
+              <button
+                onClick={() => setHistoryOpen(o => !o)}
+                className="flex items-center gap-1 text-gray-400 hover:text-emerald-600 transition-colors"
+              >
+                <Clock size={12} /> Recent conversations
+              </button>
+            </div>
+          </div>
         )}
 
         {/* ── CHAT VIEW ── */}
         {chatMode && (
           <>
             {/* Chat header */}
-            <header className="h-[60px] shrink-0 border-b border-[#E7E2DD] bg-white px-6 flex items-center gap-4">
+            <header className="h-[48px] shrink-0 border-b border-gray-200/70 bg-white/80 backdrop-blur-sm px-5 flex items-center gap-3">
               <button
                 type="button"
                 onClick={startNewChat}
@@ -462,26 +1377,69 @@ export default function Chat() {
               </button>
               <div className="h-5 w-px bg-[#E0DBD5]" />
               <span className="text-[13px] font-medium text-[#101828] truncate">
-                {messages.find((m) => m.role === 'user')?.content?.slice(0, 60) || 'Investigation'}
+                {conversationTitle}
               </span>
-              <span className="ml-auto h-7 rounded-full border border-[#DDE4E1] bg-white px-3 flex items-center gap-1.5 text-[11px] font-medium text-[#253248]">
-                <span className="h-1.5 w-1.5 rounded-full bg-[#1FB981]" />
-                {envLabel()}
-              </span>
+              <div className="ml-auto flex items-center gap-2">
+                {/* History button */}
+                <button
+                  type="button"
+                  onClick={() => setHistoryOpen(o => !o)}
+                  title="Conversation history"
+                  className={`h-7 px-2.5 rounded-[7px] flex items-center gap-1.5 text-[12px] font-medium
+                              border transition-all
+                              ${historyOpen
+                                ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                                : 'bg-white/80 border-gray-200 text-gray-500 hover:text-gray-800 hover:border-gray-300'}`}
+                >
+                  <Clock size={13} />
+                  History
+                </button>
+
+                {/* Pin as scheduled report */}
+                <button
+                  type="button"
+                  onClick={() => setPinReportOpen(true)}
+                  title="Schedule this conversation as a recurring report"
+                  className="h-7 px-2.5 rounded-[7px] flex items-center gap-1.5 text-[12px] font-medium
+                             border border-gray-200 bg-white/80 text-gray-500
+                             hover:text-emerald-700 hover:border-emerald-300 hover:bg-emerald-50 transition-all"
+                >
+                  <CalendarClock size={13} />
+                  Schedule
+                </button>
+
+                <ExportMenu
+                  open={openExportMenu === 'conversation'}
+                  onToggle={() => setOpenExportMenu((current) => current === 'conversation' ? null : 'conversation')}
+                  disabled={messages.filter((msg) => !msg.loading).length === 0}
+                  actions={exportConversationActions()}
+                />
+              </div>
             </header>
 
             {/* Messages */}
             <div className="flex-1 min-h-0 overflow-y-auto">
-              <div className="max-w-[800px] mx-auto px-6 py-8 space-y-6">
+              <div className="max-w-[1100px] mx-auto px-5 py-5 space-y-4">
                 {messages.map((msg, i) =>
                   msg.role === 'user' ? (
-                    <UserMessage key={i} text={msg.content} />
+                    <UserMessage key={i} text={msg.content} attachment={msg.attachment} />
                   ) : (
                     <AssistantMessage
                       key={i}
                       content={msg.content}
                       decisionType={msg.decisionType}
                       loading={msg.loading}
+                      queryData={msg.queryData}
+                      quickRefinements={msg.quickRefinements}
+                      onAsk={q => sendQuestion(q)}
+                      exportMenu={
+                        <ExportMenu
+                          open={openExportMenu === i}
+                          onToggle={() => setOpenExportMenu((current) => current === i ? null : i)}
+                          disabled={msg.loading}
+                          actions={exportAnswerActions(msg, i)}
+                        />
+                      }
                     />
                   )
                 )}
@@ -494,10 +1452,41 @@ export default function Chat() {
 
             {/* Chat input */}
             <div className="shrink-0 border-t border-[#E7E2DD] bg-white px-6 py-4">
+              {/* Attachment preview / loading / error */}
+              {(attachment || attachmentLoading || attachmentError) && (
+                <div className="max-w-[1100px] mx-auto mb-2">
+                  {attachmentLoading && (
+                    <div className="flex items-center gap-2 text-[12.5px] text-gray-400">
+                      <span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-emerald-400 border-t-transparent rounded-full" />
+                      Uploading file…
+                    </div>
+                  )}
+                  {attachmentError && !attachmentLoading && (
+                    <div className="flex items-center gap-2 text-[12px] text-red-500">
+                      <X size={12} className="flex-shrink-0" />
+                      <span className="flex-1">{attachmentError}</span>
+                      <button type="button" onClick={() => setAttachmentError('')}
+                        className="underline text-red-400 hover:text-red-600">Dismiss</button>
+                    </div>
+                  )}
+                  {attachment && !attachmentLoading && (
+                    <AttachmentChip attachment={attachment} onRemove={clearAttachment} />
+                  )}
+                </div>
+              )}
               <form
                 onSubmit={handleChatSubmit}
-                className="max-w-[800px] mx-auto flex items-end gap-3 rounded-[12px] border border-[#DDD8D2] bg-[#FAFAF9] px-5 py-3.5 focus-within:border-[#0C5847] transition-colors"
+                className="max-w-[1100px] mx-auto flex items-end gap-3 rounded-[12px] border border-[#DDD8D2] bg-[#FAFAF9] px-5 py-3 focus-within:border-[#0C5847] transition-colors"
               >
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={attachmentLoading}
+                  title="Attach a file or paste an image (PDF, Excel, CSV, image, text — up to 20 MB)"
+                  className="mb-0.5 flex-shrink-0 text-gray-400 hover:text-emerald-600 transition-colors disabled:opacity-40"
+                >
+                  <Paperclip size={16} />
+                </button>
                 <textarea
                   ref={chatInputRef}
                   value={chatQuery}
@@ -508,6 +1497,7 @@ export default function Chat() {
                       handleChatSubmit(e);
                     }
                   }}
+                  onPaste={handlePaste}
                   placeholder="Follow up or ask another question…"
                   rows={1}
                   className="flex-1 resize-none bg-transparent text-[14px] text-[#101828] outline-none placeholder:text-[#9AA6B5] max-h-32 overflow-y-auto"
@@ -515,7 +1505,7 @@ export default function Chat() {
                 />
                 <button
                   type="submit"
-                  disabled={submitting || !chatQuery.trim()}
+                  disabled={submitting || (!chatQuery.trim() && !attachment)}
                   className="mb-0.5 h-8 w-8 rounded-full bg-[#0C5847] text-white flex items-center justify-center hover:bg-[#084B3D] disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
                   aria-label="Send"
                 >
@@ -530,12 +1520,37 @@ export default function Chat() {
         )}
       </section>
 
-      <ChatHistory
-        conversations={conversations}
-        loading={conversationsLoading}
-        error={conversationsError}
-        onRefresh={loadConversations}
-        onOpen={openConversation}
+      {/* Floating history panel */}
+      {historyOpen && (
+        <FloatingHistory
+          conversations={conversations}
+          loading={conversationsLoading}
+          onOpen={openConversation}
+          onClose={() => setHistoryOpen(false)}
+        />
+      )}
+
+      {/* Pin as Report modal */}
+      {pinReportOpen && chatMode && (
+        <PinReportModal
+          conversationTitle={conversationTitle}
+          messages={messages}
+          user={user}
+          onClose={() => setPinReportOpen(false)}
+        />
+      )}
+
+      {/* Hidden file input — triggered by paperclip buttons in both landing and chat views */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.txt,.md,.json,.xml"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) uploadFile(file);
+          e.target.value = '';   // reset so the same file can be re-selected
+        }}
       />
     </div>
   );

@@ -9,6 +9,9 @@ import com.sei.nexus.ai.AzureOpenAiClient;
 import com.sei.nexus.ai.ChatMessage;
 import com.sei.nexus.common.Keys;
 import com.sei.nexus.common.NexusException;
+import com.sei.nexus.attachment.ChatAttachment;
+import com.sei.nexus.attachment.ChatAttachmentRepository;
+import com.sei.nexus.connection.ConnectionRepository;
 import com.sei.nexus.enterprise.EnterpriseMapService;
 import com.sei.nexus.knowledge.KnowledgeGap;
 import com.sei.nexus.knowledge.KnowledgeGapRepository;
@@ -48,6 +51,7 @@ public class ChatService {
     private final EnterpriseMapService enterpriseMapService;
     private final SemanticService semanticService;
     private final AgentRepository agentRepository;
+    private final ConnectionRepository connectionRepository;
     private final QueryGovernanceService queryGovernanceService;
     private final QueryExecutionRepository queryExecutionRepository;
     private final DynamicSqlService dynamicSqlService;
@@ -55,14 +59,16 @@ public class ChatService {
     private final BaselineService baselineService;
     private final KnowledgeGapRepository knowledgeGapRepository;
     private final KnowledgeGraphService knowledgeGraphService;
-    private final AzureOpenAiClient aiClient;
-    private final ObjectMapper objectMapper;
+    private final AzureOpenAiClient        aiClient;
+    private final ObjectMapper             objectMapper;
+    private final ChatAttachmentRepository attachmentRepository;
 
     public ChatService(RunRepository runRepository,
                        DocumentMemoryService documentMemoryService,
                        EnterpriseMapService enterpriseMapService,
                        SemanticService semanticService,
                        AgentRepository agentRepository,
+                       ConnectionRepository connectionRepository,
                        QueryGovernanceService queryGovernanceService,
                        QueryExecutionRepository queryExecutionRepository,
                        DynamicSqlService dynamicSqlService,
@@ -71,21 +77,24 @@ public class ChatService {
                        KnowledgeGapRepository knowledgeGapRepository,
                        KnowledgeGraphService knowledgeGraphService,
                        AzureOpenAiClient aiClient,
-                       ObjectMapper objectMapper) {
-        this.runRepository = runRepository;
+                       ObjectMapper objectMapper,
+                       ChatAttachmentRepository attachmentRepository) {
+        this.runRepository        = runRepository;
         this.documentMemoryService = documentMemoryService;
-        this.enterpriseMapService = enterpriseMapService;
-        this.semanticService = semanticService;
-        this.agentRepository = agentRepository;
-        this.queryGovernanceService = queryGovernanceService;
-        this.queryExecutionRepository = queryExecutionRepository;
-        this.dynamicSqlService = dynamicSqlService;
-        this.reasoningRepository = reasoningRepository;
-        this.baselineService = baselineService;
+        this.enterpriseMapService  = enterpriseMapService;
+        this.semanticService       = semanticService;
+        this.agentRepository       = agentRepository;
+        this.connectionRepository  = connectionRepository;
+        this.queryGovernanceService    = queryGovernanceService;
+        this.queryExecutionRepository  = queryExecutionRepository;
+        this.dynamicSqlService     = dynamicSqlService;
+        this.reasoningRepository   = reasoningRepository;
+        this.baselineService       = baselineService;
         this.knowledgeGapRepository = knowledgeGapRepository;
-        this.knowledgeGraphService = knowledgeGraphService;
-        this.aiClient = aiClient;
-        this.objectMapper = objectMapper;
+        this.knowledgeGraphService  = knowledgeGraphService;
+        this.aiClient              = aiClient;
+        this.objectMapper          = objectMapper;
+        this.attachmentRepository  = attachmentRepository;
     }
 
     // =========================================================================
@@ -107,7 +116,37 @@ public class ChatService {
             raw = raw.substring(7).trim();
             forceAsync = true;
         }
-        final String question = raw;
+        // STEP 1b: Load attachment content if present.
+        // IMPORTANT: the raw user question (raw) is kept separate from the enriched
+        // version (enrichedQuestion) that includes file content.
+        // - Routing, intent detection, agent selection all use `raw` — they must read
+        //   the user's intent, not the file contents.
+        // - SQL planning and answer composition use `enrichedQuestion` — they need the
+        //   file content to build WHERE IN clauses and incorporate reference data.
+        // - The run record stored in the DB also uses `raw` to keep it readable.
+        String attachmentContext = "";
+        String attachmentSummary = "";
+        if (request.attachmentKey() != null && !request.attachmentKey().isBlank()) {
+            try {
+                ChatAttachment att = attachmentRepository.findByKey(request.attachmentKey())
+                        .orElse(null);
+                if (att != null && att.extractedText() != null) {
+                    attachmentContext = att.extractedText();
+                    attachmentSummary = att.summary() != null ? att.summary() : att.fileName();
+                    log.info("Attachment '{}' ({}) injected into conversation context",
+                            att.fileName(), att.attachmentType());
+                }
+            } catch (Exception e) {
+                log.warn("Could not load attachment {}: {}", request.attachmentKey(), e.getMessage());
+            }
+        }
+
+        // enrichedQuestion is used only by the SQL planner and answer composer.
+        final String enrichedQuestion = attachmentContext.isBlank() ? raw
+                : "=== ATTACHED FILE: " + attachmentSummary + " ===\n"
+                + attachmentContext + "\n"
+                + "=== END OF ATTACHMENT ===\n\n"
+                + "User question: " + raw;
 
         // STEP 2: Conversation
         String conversationId = (request.conversationId() != null && !request.conversationId().isBlank())
@@ -116,59 +155,69 @@ public class ChatService {
         // STEP 3: Recent history
         List<NexusRun> history = runRepository.findConversationRuns(conversationId, 8);
 
-        // STEP 4: Route agent
-        NexusAgent agent = resolveAgent(request.agentKey(), question, history);
+        // STEP 4: Route agent — use raw question only (not file content)
+        NexusAgent agent = resolveAgent(request.agentKey(), raw, history);
         double routingConfidence = agent != null ? 0.9 : 0.5;
 
-        // STEP 5: Save run
+        // STEP 5: Save run — store clean question, not the full file dump
         String runKey = Keys.runKey();
         NexusRun run = new NexusRun(runKey, conversationId,
                 agent != null ? agent.agentKey() : null,
                 agent != null ? agent.domainKeys() : null,
-                userEmail, question, null, null, "RUNNING", null, null, null);
+                userEmail, raw, null, null, "RUNNING", null, null, null);
         runRepository.save(run);
 
         try {
             List<String> domainKeys = toDomainKeyList(agent);
             List<String> connKeys = toConnKeyList(agent);
 
-            // STEP 6: Memory retrieval
-            List<DocumentChunk> memChunks = documentMemoryService.retrieveContext(question, domainKeys);
+            // STEP 6: Memory retrieval — semantic search on the user's intent, not the file
+            List<DocumentChunk> memChunks = documentMemoryService.retrieveContext(raw, domainKeys);
 
             // STEP 7: Enterprise + Semantic + Anomaly + Findings context
-            Map<String, Object> entCtx = enterpriseMapService.operationalContext(domainKeys, connKeys, question);
-            String semCtx = semanticService.buildSemanticContext(domainKeys, question);
+            Map<String, Object> entCtx = enterpriseMapService.operationalContext(domainKeys, connKeys, raw);
+            String semCtx = semanticService.buildSemanticContext(domainKeys, raw);
             List<OperationalFinding> findings = reasoningRepository.findRecentFindings(domainKeys, 5);
             String anomalyCtx = baselineService.getAnomalyContext(domainKeys);
 
-            // STEP 8: Write intent boundary
-            if (isWriteIntent(question)) {
-                String ans = "SEI Nexus is a read-only operational reasoning system. I can help you " +
-                        "investigate and understand enterprise data, but cannot perform modifications. " +
+            // STEP 8: Write intent boundary — check user's question only
+            if (isWriteIntent(raw)) {
+                String ans = "Zevra is a read-only operational intelligence platform. I can help you " +
+                        "investigate and understand your business data, but cannot perform modifications. " +
                         "Use /request-source to request workflow integrations.";
                 runRepository.update(runKey, ans, "READ_ONLY_BOUNDARY", "COMPLETE", null);
                 return buildResponse(conversationId, runKey, ans, "READ_ONLY_BOUNDARY",
-                        agent, routingConfidence, false, List.of(), List.of());
+                        agent, routingConfidence, false, List.of(), List.of(), List.of());
             }
 
             // STEP 9: Prior result check
             Optional<String> priorSnapshot = runRepository.latestResultSnapshot(conversationId);
 
-            // STEP 10: LLM decision
-            Map<String, Object> decision = getLlmDecision(question, memChunks, entCtx, semCtx,
+            // STEP 10: LLM decision — routes on user intent (raw), not file content.
+            // This is the key: the router sees "do these orders exist in the system?" and
+            // naturally picks QUERY_LIVE_DATA. It doesn't need to see the CSV to decide that.
+            Map<String, Object> decision = getLlmDecision(raw, memChunks, entCtx, semCtx,
                     findings, anomalyCtx, history, priorSnapshot.isPresent(), agent);
             String decisionType = (String) decision.getOrDefault("type", "ANSWER_FROM_MEMORY");
 
             String answer;
             List<Map<String, Object>> asyncOps = new ArrayList<>();
+            List<Map<String, Object>> queryData = new ArrayList<>();
             String resultSnapshot = null;
 
             switch (decisionType) {
                 case "ANSWER_FROM_PRIOR_RESULTS" -> {
-                    answer = answerFromPriorResults(question, priorSnapshot.get(), memChunks, history, agent);
+                    if (priorSnapshot.isPresent()) {
+                        answer = answerFromPriorResults(raw, priorSnapshot.get(), memChunks, history, agent);
+                    } else {
+                        // enrichedQuestion so the file content is available if the question was about the file
+                        answer = answerFromMemory(enrichedQuestion, memChunks, semCtx, entCtx, agent);
+                    }
                 }
                 case "ANSWER_FROM_MEMORY" -> {
-                    answer = answerFromMemory(question, memChunks, semCtx, entCtx, agent);
+                    // enrichedQuestion: if the user uploaded a file and asked about it, this path
+                    // has the file content available so the AI can summarise / translate / explain it.
+                    answer = answerFromMemory(enrichedQuestion, memChunks, semCtx, entCtx, agent);
                 }
                 case "ASK_CLARIFICATION" -> {
                     answer = (String) decision.getOrDefault("clarification_question",
@@ -178,7 +227,7 @@ public class ChatService {
                     String gapKey = Keys.uniqueKey("gap");
                     KnowledgeGap gap = new KnowledgeGap(gapKey,
                             agent != null ? agent.domainKeys() : null,
-                            "MISSING_KNOWLEDGE", runKey, question,
+                            "MISSING_KNOWLEDGE", runKey, raw,
                             "No approved knowledge or data sources found for this question.",
                             null, "OPEN", null, null, null, null);
                     knowledgeGapRepository.save(gap);
@@ -192,7 +241,7 @@ public class ChatService {
                     ReasoningSession session = new ReasoningSession(sessionKey, runKey, conversationId,
                             agent != null ? agent.agentKey() : null,
                             agent != null ? agent.domainKeys() : null,
-                            question, null, "ACTIVE", null, null, Instant.now(), null);
+                            raw, null, "ACTIVE", null, null, Instant.now(), null);
                     reasoningRepository.saveSession(session);
 
                     // Playbook context
@@ -204,13 +253,14 @@ public class ChatService {
                         }
                     }
 
-                    // Generate investigation plan
-                    String planJson = generateInvestigationPlan(question, entCtx, semCtx,
+                    // Generate investigation plan — enrichedQuestion gives the SQL planner
+                    // the file content so it can extract IDs/values for WHERE IN clauses.
+                    String planJson = generateInvestigationPlan(enrichedQuestion, entCtx, semCtx,
                             memChunks, findings, anomalyCtx, playbookCtx, history, agent);
                     List<Map<String, Object>> steps = parsePlan(planJson);
 
                     // Initial hypothesis
-                    String hypText = generateHypothesisText(question, agent);
+                    String hypText = generateHypothesisText(raw, agent);
                     Hypothesis hyp = new Hypothesis(Keys.uniqueKey("hyp"), sessionKey, hypText,
                             0.5, "[]", "[]", "ACTIVE", Instant.now(), null);
                     reasoningRepository.saveHypothesis(hyp);
@@ -225,6 +275,22 @@ public class ChatService {
                         String desc = step.containsKey("description") ? (String) step.get("description") : "Step " + stepNo;
 
                         if (sql == null || connKey == null || connKey.isBlank()) {
+                            stepNo++;
+                            continue;
+                        }
+
+                        // Validate the connection key exists before handing to governance.
+                        // The AI sometimes invents a key from context (table name, group label).
+                        // Skip the step gracefully rather than throwing a 500.
+                        if (connectionRepository.findByKeyOrName(connKey).isEmpty()) {
+                            log.warn("Step {} skipped — connection '{}' is referenced by data objects " +
+                                     "but no longer exists in nexus_connection. " +
+                                     "The connection may have been deleted after onboarding.",
+                                     stepNo, connKey);
+                            execResults.add(Map.of("step", stepNo, "error",
+                                    "The database connection configured during onboarding (" + connKey + ") " +
+                                    "no longer exists. Please re-add the connection in the Connections page " +
+                                    "and then use POST /onboarding/reset to re-run onboarding."));
                             stepNo++;
                             continue;
                         }
@@ -265,9 +331,22 @@ public class ChatService {
                         stepNo++;
                     }
 
-                    answer = composeAnswer(question, execResults, memChunks, semCtx, findings, anomalyCtx,
+                    answer = composeAnswer(raw, attachmentSummary, execResults, memChunks, semCtx, findings, anomalyCtx,
                             agent, "HYBRID_DOC_AND_DATA".equals(decisionType));
                     reasoningRepository.updateSessionStatus(sessionKey, "CONCLUDED", answer, 0.8, Instant.now());
+
+                    // Collect rows from the first successful sync step for frontend visualisation.
+                    // Capped at 100 rows — the chart never needs more than that.
+                    for (Map<String, Object> r : execResults) {
+                        if (r.containsKey("rows")) {
+                            @SuppressWarnings("unchecked")
+                            List<Map<String, Object>> stepRows = (List<Map<String, Object>>) r.get("rows");
+                            if (!stepRows.isEmpty()) {
+                                queryData = stepRows.size() > 100 ? stepRows.subList(0, 100) : stepRows;
+                            }
+                            break;
+                        }
+                    }
                 }
                 default -> {
                     answer = "I was unable to determine how to answer this question with available approved sources.";
@@ -280,9 +359,9 @@ public class ChatService {
                             "agent", agent != null ? agent.agentKey() : "none",
                             "memory_chunks", memChunks.size())));
 
-            List<Map<String, Object>> quickRefs = buildQuickRefinements(decisionType, question);
+            List<Map<String, Object>> quickRefs = buildQuickRefinements(decisionType, raw);
             return buildResponse(conversationId, runKey, answer, decisionType,
-                    agent, routingConfidence, "KNOWLEDGE_GAP".equals(decisionType), quickRefs, asyncOps);
+                    agent, routingConfidence, "KNOWLEDGE_GAP".equals(decisionType), quickRefs, asyncOps, queryData);
 
         } catch (Exception e) {
             log.error("Chat orchestration failed for run {}: {}", runKey, e.getMessage(), e);
@@ -351,15 +430,24 @@ public class ChatService {
                       "requiresClarification": false,
                       "clarification_question": ""
                     }
+
                     Routing rules (in priority order):
-                    1. Use ANSWER_FROM_PRIOR_RESULTS if conversation history exists AND the question is a follow-up —
-                       this includes questions like "how?", "why?", "explain", "source?", "how did you get that?",
-                       "are you sure?", "what data?", "break it down", or any question referencing a prior answer.
-                    2. Use QUERY_LIVE_DATA if approved data sources exist and fresh live data is needed.
+                    1. Use ANSWER_FROM_PRIOR_RESULTS ONLY when the question is specifically asking about
+                       the previous answer itself — not new data. Examples: "explain that", "show me the SQL
+                       you used", "how did you get that number", "why that result", "are you sure",
+                       "what query ran", "break down that specific number".
+                       DO NOT use this for any question that asks for new data, a different metric,
+                       a different filter, or a different entity — even if it is in the same conversation.
+                    2. Use QUERY_LIVE_DATA if the question needs fresh data from the database — including
+                       follow-up questions that ask for different metrics, different filters, or different
+                       entities than what was previously returned.
                     3. Use ANSWER_FROM_MEMORY if document memory can answer without live data.
                     4. Use HYBRID_DOC_AND_DATA for complex questions needing both memory and live data.
                     5. Use KNOWLEDGE_GAP if no knowledge or data sources are available at all.
                     6. Use ASK_CLARIFICATION ONLY if the question is completely ambiguous AND there is no prior conversation context.
+                    Key rule: when in doubt between ANSWER_FROM_PRIOR_RESULTS and QUERY_LIVE_DATA,
+                    always choose QUERY_LIVE_DATA. It is always better to query fresh data than to
+                    give a wrong answer from stale results.
                     """;
             String resp = aiClient.chat(List.of(ChatMessage.user(prompt)), sys);
             return objectMapper.readValue(extractJson(resp),
@@ -393,6 +481,20 @@ public class ChatService {
                     - Use exact column names from the schema
                     - Joins, aggregations, GROUP BY, ORDER BY are all valid
                     - Do not use SELECT *; always name columns explicitly
+
+                    ATTACHED FILE RULE:
+                    If the question contains "=== ATTACHED FILE ===" markers, the content between those
+                    markers is reference data uploaded by the user. You MUST:
+                    1. Extract the relevant identifiers from the file (IDs, codes, reference numbers,
+                       names — whatever column in the file matches an identifier column in the database).
+                    2. Embed those values directly as literals in a SQL WHERE ... IN (...) clause or
+                       equivalent filter. Example: WHERE id IN ('REF-001','REF-002','REF-003')
+                    3. SELECT the database columns that let the user verify existence and compare status
+                       (e.g. id, name, status, date — not SELECT *).
+                    This is a cross-reference query: the file provides the lookup keys, the database
+                    provides the ground truth. Never skip the WHERE filter; without it the query returns
+                    unrelated rows.
+
                     Return a JSON array only (no extra text):
                     [{"step":1,"description":"...","sql":"SELECT ...","connection_key":"...","object_keys":"..."}]
                     """;
@@ -483,47 +585,113 @@ public class ChatService {
         }
     }
 
-    private String composeAnswer(String question, List<Map<String, Object>> execResults,
+    private String composeAnswer(String question, String attachmentSummary,
+            List<Map<String, Object>> execResults,
             List<DocumentChunk> memChunks, String semCtx, List<OperationalFinding> findings,
             String anomalyCtx, NexusAgent agent, boolean includeMemory) {
         try {
             StringBuilder ctx = new StringBuilder();
-            ctx.append("Query results:\n");
+
+            boolean anyRows = false;
+
             for (Map<String, Object> r : execResults) {
                 if (r.containsKey("rows")) {
                     @SuppressWarnings("unchecked")
                     List<Map<String, Object>> rows = (List<Map<String, Object>>) r.get("rows");
-                    ctx.append("Step ").append(r.get("step")).append(": ").append(rows.size()).append(" rows\n");
-                    rows.stream().limit(10).forEach(row -> ctx.append("  ").append(row).append("\n"));
+                    ctx.append(buildRowSummary(rows));
+                    if (!rows.isEmpty()) anyRows = true;
                 } else if (r.containsKey("error")) {
-                    ctx.append("Step ").append(r.get("step")).append(" error: ").append(r.get("error")).append("\n");
+                    ctx.append("Query error: ").append(r.get("error")).append("\n");
                 } else if (r.containsKey("blocked")) {
-                    ctx.append("Step ").append(r.get("step")).append(" blocked: ").append(r.get("reason")).append("\n");
-                } else if (r.containsKey("needs_filter")) {
-                    ctx.append("Step ").append(r.get("step")).append(" needs filter: ").append(r.get("reason")).append("\n");
+                    ctx.append("Query blocked: ").append(r.get("reason")).append("\n");
                 }
             }
+
             if (!findings.isEmpty()) {
-                ctx.append("\nPrior Findings:\n");
-                findings.forEach(f -> ctx.append("- ").append(f.title()).append(": ").append(f.description()).append("\n"));
+                ctx.append("\nRelevant prior findings:\n");
+                findings.stream().limit(2).forEach(f ->
+                        ctx.append("- ").append(f.title()).append(": ").append(f.description()).append("\n"));
             }
             if (!anomalyCtx.isBlank()) ctx.append("\n").append(anomalyCtx);
             if (includeMemory) {
-                memChunks.stream().limit(3).forEach(c -> {
-                    int len = Math.min(500, c.chunkText().length());
-                    ctx.append("\nKnowledge: ").append(c.chunkText(), 0, len);
-                });
+                memChunks.stream().limit(2).forEach(c ->
+                        ctx.append("\nContext: ").append(c.chunkText(), 0, Math.min(300, c.chunkText().length())));
             }
-            String prompt = "Question: " + question + "\n\nInvestigation results:\n" + ctx;
-            return aiClient.chat(List.of(ChatMessage.user(prompt)),
-                    "You are SEI Nexus, an enterprise operational reasoning platform. " +
-                    "Compose a clear, business-focused answer based on the investigation results. " +
-                    "Highlight key findings, identify patterns, and suggest next steps if appropriate. " +
-                    "Format the answer with markdown headings and bullet points for clarity.");
+
+            // When a file was attached and the database returned nothing, be explicit.
+            // Do not let the AI fall back to analysing the file content.
+            String attachmentNote = (attachmentSummary != null && !attachmentSummary.isBlank())
+                    ? "\nNote: the user uploaded a file (" + attachmentSummary + ") whose values were used as query parameters."
+                    : "";
+
+            String prompt = "Question: " + question + attachmentNote + "\n\nQuery results:\n" + ctx;
+
+            String systemPrompt = anyRows
+                    ? """
+                    You are Zevra, an enterprise operational intelligence AI.
+                    The full data is already shown to the user in a table and chart — do NOT list individual records or reproduce row-level data.
+                    Write a concise analyst summary of 2-4 sentences covering:
+                    1. Total count and headline distribution (e.g. "42 records: 28 active, 10 closed, 4 pending")
+                    2. The single most important insight or anomaly
+                    3. One actionable recommendation only if clearly warranted
+                    Use plain prose. Bold key numbers. No markdown headings or bullet lists unless there are multiple distinct anomalies.
+                    """
+                    : """
+                    You are Zevra, an enterprise operational intelligence AI.
+                    The database query returned zero matching rows.
+                    If the user uploaded a file, those values were used as lookup parameters — zero rows means
+                    those records do NOT exist in the connected database.
+                    State this clearly and concisely: what was searched for, what was found (nothing), and
+                    what the user should check next (e.g. wrong table, different ID format, data not yet loaded).
+                    Do NOT summarise or analyse the uploaded file content itself — it was input, not output.
+                    Keep the response to 2-3 sentences.
+                    """;
+
+            return aiClient.chat(List.of(ChatMessage.user(prompt)), systemPrompt);
         } catch (Exception e) {
-            return "Investigation completed. " + execResults.size() + " step(s) executed. " +
-                    (execResults.stream().anyMatch(r -> r.containsKey("rows")) ? "Results available." : "No data returned.");
+            return "Investigation completed. " +
+                    (execResults.stream().anyMatch(r -> r.containsKey("rows")) ? "Results are shown in the table below." : "No data returned.");
         }
+    }
+
+    /**
+     * Builds a compact statistical summary of query rows for the AI context.
+     * Sends distributions and totals, never individual row values — the frontend
+     * table handles row-level display.
+     */
+    private String buildRowSummary(List<Map<String, Object>> rows) {
+        if (rows.isEmpty()) return "Query returned 0 rows.\n";
+        StringBuilder sb = new StringBuilder();
+        sb.append("Total rows: ").append(rows.size()).append("\n");
+
+        java.util.Set<String> cols = rows.get(0).keySet();
+        sb.append("Columns: ").append(String.join(", ", cols)).append("\n");
+
+        for (String col : cols) {
+            // Distribution for low-cardinality string columns (likely categorical)
+            java.util.List<String> strVals = rows.stream()
+                    .map(r -> String.valueOf(r.getOrDefault(col, "")))
+                    .filter(v -> !v.isBlank() && !v.equals("null"))
+                    .collect(java.util.stream.Collectors.toList());
+            java.util.Map<String, Long> dist = strVals.stream()
+                    .collect(java.util.stream.Collectors.groupingBy(v -> v, java.util.stream.Collectors.counting()));
+            boolean isLowCardinality = dist.size() >= 2 && dist.size() <= 8 && dist.size() < rows.size();
+            boolean looksNumeric = strVals.stream().allMatch(v -> { try { Double.parseDouble(v); return true; } catch (Exception e) { return false; } });
+            boolean isId = col.toLowerCase().endsWith("_id") || col.equalsIgnoreCase("id");
+
+            if (isLowCardinality && !looksNumeric) {
+                sb.append("  ").append(col).append(" distribution: ").append(dist).append("\n");
+            } else if (looksNumeric && !isId) {
+                // Sum and average for numeric non-ID columns
+                try {
+                    double sum = strVals.stream().mapToDouble(Double::parseDouble).sum();
+                    double avg = sum / strVals.size();
+                    sb.append("  ").append(col).append(": sum=").append(String.format("%.2f", sum))
+                      .append(", avg=").append(String.format("%.2f", avg)).append("\n");
+                } catch (Exception ignored) {}
+            }
+        }
+        return sb.toString();
     }
 
     // =========================================================================
@@ -550,15 +718,22 @@ public class ChatService {
         }
 
         // ── Enterprise map entity context (columns, scan data) ────────────────
-        if (entCtx.containsKey("entityContext")) {
-            String ec = (String) entCtx.get("entityContext");
-            if (ec != null && !ec.isBlank()) {
-                sb.append("=== TABLE SCHEMA ===\n").append(ec).append("\n");
+        boolean hasMemory = memChunks != null && !memChunks.isEmpty();
+        String ec = entCtx.containsKey("entityContext") ? (String) entCtx.get("entityContext") : null;
+        if (ec != null && !ec.isBlank()) {
+            sb.append("=== TABLE SCHEMA ===\n").append(ec).append("\n");
+        } else {
+            sb.append("=== TABLE SCHEMA ===\n");
+            sb.append("NO LIVE DATA SOURCES CONFIGURED. Do NOT generate SQL or use QUERY_LIVE_DATA.\n");
+            if (hasMemory) {
+                sb.append("Memory documents ARE available — use ANSWER_FROM_MEMORY.\n\n");
+            } else {
+                sb.append("No memory documents either — use KNOWLEDGE_GAP.\n\n");
             }
         }
 
         // ── Supporting context ────────────────────────────────────────────────
-        if (memChunks != null && !memChunks.isEmpty()) {
+        if (hasMemory) {
             sb.append("Knowledge memory chunks: ").append(memChunks.size()).append(" available\n");
         }
         if (!semCtx.isBlank()) sb.append("Semantic layer: available\n");
@@ -632,7 +807,7 @@ public class ChatService {
                 "KNOWLEDGE_PROPOSAL", "COMPLETE", null);
         return buildResponse(convId, runKey,
                 "Your knowledge proposal has been submitted for review by the domain owner. Ref: " + gapKey,
-                "KNOWLEDGE_PROPOSAL", null, 1.0, false, List.of(), List.of());
+                "KNOWLEDGE_PROPOSAL", null, 1.0, false, List.of(), List.of(), List.of());
     }
 
     private ChatResponse handleSourceRequest(String text, String userEmail) {
@@ -648,7 +823,7 @@ public class ChatService {
         runRepository.update(runKey, "Source request submitted.", "SOURCE_REQUEST", "COMPLETE", null);
         return buildResponse(convId, runKey,
                 "Your source request has been submitted for review. Ref: " + gapKey,
-                "SOURCE_REQUEST", null, 1.0, false, List.of(), List.of());
+                "SOURCE_REQUEST", null, 1.0, false, List.of(), List.of(), List.of());
     }
 
     // =========================================================================
@@ -657,7 +832,8 @@ public class ChatService {
 
     private ChatResponse buildResponse(String conversationId, String runKey, String answer,
             String decisionType, NexusAgent agent, double confidence, boolean needsKnowledge,
-            List<Map<String, Object>> quickRefs, List<Map<String, Object>> asyncOps) {
+            List<Map<String, Object>> quickRefs, List<Map<String, Object>> asyncOps,
+            List<Map<String, Object>> queryData) {
         String evidenceMode = (decisionType.contains("QUERY") || decisionType.contains("HYBRID"))
                 ? "LIVE_DATA" : "MEMORY";
         OrchestratorDecision decision = new OrchestratorDecision(
@@ -673,7 +849,8 @@ public class ChatService {
                 agent != null ? agent.name() : null,
                 agent != null ? agent.domainKeys() : null,
                 confidence, needsKnowledge, "",
-                quickRefs, asyncOps);
+                quickRefs, asyncOps,
+                queryData != null ? queryData : List.of());
     }
 
     // =========================================================================

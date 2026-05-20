@@ -1,0 +1,21 @@
+order_id,customer_name,product,category,quantity,unit_price,total_amount,order_date,status,region
+ORD-1001,Acme Corp,Industrial Pump A300,Equipment,2,4500.00,9000.00,2026-01-05,Delivered,North
+ORD-1002,Blue Ridge Ltd,Safety Helmets (Pack 50),Safety,10,320.00,3200.00,2026-01-08,Delivered,South
+ORD-1003,Horizon Supplies,Steel Pipes 6m,Raw Material,50,85.00,4250.00,2026-01-12,In Transit,East
+ORD-1004,Pinnacle Works,Conveyor Belt B20,Equipment,1,12800.00,12800.00,2026-01-15,Processing,West
+ORD-1005,Acme Corp,Lubricant Drum 200L,Consumables,8,210.00,1680.00,2026-01-18,Delivered,North
+ORD-1006,Summit Industries,Electrical Panel CP5,Electrical,3,2200.00,6600.00,2026-01-20,Delivered,South
+ORD-1007,Horizon Supplies,Bolts & Fasteners Set,Hardware,200,12.50,2500.00,2026-01-22,Delivered,East
+ORD-1008,Green Valley Co,Water Filter System,Equipment,1,8900.00,8900.00,2026-01-25,In Transit,North
+ORD-1009,Blue Ridge Ltd,Work Gloves (Box 100),Safety,15,145.00,2175.00,2026-01-28,Processing,South
+ORD-1010,Pinnacle Works,Generator 50KVA,Electrical,2,18500.00,37000.00,2026-02-01,Delivered,West
+ORD-1011,Summit Industries,Hydraulic Hose 10m,Components,30,75.00,2250.00,2026-02-04,Delivered,South
+ORD-1012,Acme Corp,Compressor AC400,Equipment,1,9200.00,9200.00,2026-02-06,Cancelled,North
+ORD-1013,Green Valley Co,Paint Industrial 20L,Consumables,40,95.00,3800.00,2026-02-10,Delivered,North
+ORD-1014,Horizon Supplies,Ladder Aluminium 6m,Safety,6,280.00,1680.00,2026-02-13,In Transit,East
+ORD-1015,Blue Ridge Ltd,Drill Machine HD,Tools,4,650.00,2600.00,2026-02-15,Delivered,South
+ORD-1016,Pinnacle Works,Steel Pipes 6m,Raw Material,80,85.00,6800.00,2026-02-18,Processing,West
+ORD-1017,Summit Industries,Electrical Cable 100m,Electrical,25,180.00,4500.00,2026-02-20,Delivered,South
+ORD-1018,Acme Corp,Hydraulic Jack 10T,Tools,3,1100.00,3300.00,2026-02-22,Delivered,North
+ORD-1019,Green Valley Co,Pump Seal Kit,Components,12,340.00,4080.00,2026-02-25,Delivered,North
+ORD-1020,Blue Ridge Ltd,Fire Extinguisher 9L,Safety,20,115.00,2300.00,2026-03-01,In Transit,South
