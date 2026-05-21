@@ -27,7 +27,7 @@ public class ColumnPolicyRepository {
                     (policy_key, object_key, column_name, mask_type,
                      constant_value, partial_chars, exempt_roles,
                      created_by, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,NOW(),NOW())
+                VALUES (?,?,?,?,?,?,?::text[],?,NOW(),NOW())
                 ON CONFLICT (policy_key) DO UPDATE SET
                     object_key      = EXCLUDED.object_key,
                     column_name     = EXCLUDED.column_name,
@@ -39,7 +39,7 @@ public class ColumnPolicyRepository {
                 """,
                 key, p.objectKey(), p.columnName(), p.maskType(),
                 p.constantValue(), p.partialChars(),
-                toSqlArray(p.exemptRoles()),
+                toArrayLiteral(p.exemptRoles()),
                 p.createdBy());
         return findByKey(key).orElseThrow();
     }
@@ -56,11 +56,9 @@ public class ColumnPolicyRepository {
                 mapper());
     }
 
-    /** Returns all active policies for the given object keys — called by ColumnMaskingService. */
     public List<ColumnPolicy> findByObjectKeys(List<String> objectKeys) {
         if (objectKeys == null || objectKeys.isEmpty()) return List.of();
-        String placeholders = "?".repeat(objectKeys.size())
-                .chars().mapToObj(c -> "?")
+        String placeholders = objectKeys.stream().map(k -> "?")
                 .collect(java.util.stream.Collectors.joining(","));
         return jdbc.query(
                 "SELECT * FROM nexus_column_policy WHERE object_key IN (" + placeholders + ")",
@@ -91,13 +89,19 @@ public class ColumnPolicyRepository {
         };
     }
 
-    private Array toSqlArray(String[] values) {
-        try {
-            return jdbc.getDataSource().getConnection()
-                    .createArrayOf("text", values != null ? values : new String[0]);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to create SQL array", e);
+    /**
+     * Converts a Java String array to a PostgreSQL array literal (e.g. {"a","b"}).
+     * Passed as a plain text parameter with ?::text[] cast in SQL — no Connection
+     * borrow required, so no risk of pool exhaustion.
+     */
+    private String toArrayLiteral(String[] values) {
+        if (values == null || values.length == 0) return "{}";
+        StringBuilder sb = new StringBuilder("{");
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0) sb.append(',');
+            sb.append('"').append(values[i].replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
         }
+        return sb.append('}').toString();
     }
 
     private Instant toInstant(Timestamp ts) {

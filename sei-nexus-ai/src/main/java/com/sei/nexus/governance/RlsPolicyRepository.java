@@ -26,7 +26,7 @@ public class RlsPolicyRepository {
                 INSERT INTO nexus_rls_policy
                     (policy_key, policy_name, object_key, filter_template,
                      applies_to_roles, is_active, created_by, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,NOW(),NOW())
+                VALUES (?,?,?,?,?::text[],?,?,NOW(),NOW())
                 ON CONFLICT (policy_key) DO UPDATE SET
                     policy_name      = EXCLUDED.policy_name,
                     object_key       = EXCLUDED.object_key,
@@ -36,7 +36,7 @@ public class RlsPolicyRepository {
                     updated_at       = NOW()
                 """,
                 key, p.policyName(), p.objectKey(), p.filterTemplate(),
-                toSqlArray(p.appliesToRoles()),
+                toArrayLiteral(p.appliesToRoles()),
                 p.isActive(), p.createdBy());
         return findByKey(key).orElseThrow();
     }
@@ -53,7 +53,6 @@ public class RlsPolicyRepository {
                 mapper());
     }
 
-    /** Returns active policies for the given object keys — called per query step. */
     public List<RlsPolicy> findActiveByObjectKeys(List<String> objectKeys) {
         if (objectKeys == null || objectKeys.isEmpty()) return List.of();
         String placeholders = objectKeys.stream().map(k -> "?")
@@ -92,13 +91,14 @@ public class RlsPolicyRepository {
         };
     }
 
-    private Array toSqlArray(String[] values) {
-        try {
-            return jdbc.getDataSource().getConnection()
-                    .createArrayOf("text", values != null ? values : new String[0]);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to create SQL array", e);
+    private String toArrayLiteral(String[] values) {
+        if (values == null || values.length == 0) return "{}";
+        StringBuilder sb = new StringBuilder("{");
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0) sb.append(',');
+            sb.append('"').append(values[i].replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
         }
+        return sb.append('}').toString();
     }
 
     private Instant toInstant(Timestamp ts) {
