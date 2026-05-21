@@ -1085,12 +1085,20 @@ export default function Chat({ prefillQuestion = null, onPrefillUsed = null }) {
       const runs = safeArray(await api.chat.conversation(convId));
       const msgs = [];
       for (const run of runs) {
-        if (run.question) msgs.push({ role: 'user', content: run.question });
-        if (run.answer) msgs.push({
-          role: 'assistant',
-          content: run.answer,
-          decisionType: run.decision_type || run.decisionType,
-        });
+        if (run.question) {
+          msgs.push({ role: 'user', content: run.question });
+        }
+        if (run.answer) {
+          // query_data is now returned as a parsed array by the backend.
+          // Cap at 100 rows so the table never renders an unusable wall of data.
+          const qd = safeArray(run.query_data);
+          msgs.push({
+            role:          'assistant',
+            content:       run.answer,
+            decisionType:  run.decision_type || run.decisionType,
+            queryData:     qd.length > 100 ? qd.slice(0, 100) : qd,
+          });
+        }
       }
       if (msgs.length > 0) {
         setMessages(msgs);
