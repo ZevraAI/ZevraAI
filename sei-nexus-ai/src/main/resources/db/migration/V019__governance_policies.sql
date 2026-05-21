@@ -9,7 +9,7 @@
 --   HASH     → MD5(CAST(col AS TEXT)) — value anonymised but deterministic
 --   PARTIAL  → first N chars + '****' — useful for IDs, phone numbers
 --   CONSTANT → replaced with a fixed string (e.g. 'REDACTED')
-CREATE TABLE nexus_column_policy (
+CREATE TABLE IF NOT EXISTS nexus_column_policy (
     id             BIGSERIAL    PRIMARY KEY,
     policy_key     VARCHAR(255) NOT NULL UNIQUE,
     object_key     VARCHAR(255) NOT NULL,          -- nexus_data_object.object_key
@@ -25,7 +25,7 @@ CREATE TABLE nexus_column_policy (
     updated_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_col_policy_object ON nexus_column_policy(object_key);
+CREATE INDEX IF NOT EXISTS idx_col_policy_object ON nexus_column_policy(object_key);
 
 -- ── Row-level security policies ───────────────────────────────────────────────
 -- Automatically appends a WHERE condition to every query touching the table.
@@ -37,7 +37,7 @@ CREATE INDEX idx_col_policy_object ON nexus_column_policy(object_key);
 -- Example templates:
 --   "region = {user.region}"
 --   "department_code = {user.department} OR is_public = TRUE"
-CREATE TABLE nexus_rls_policy (
+CREATE TABLE IF NOT EXISTS nexus_rls_policy (
     id              BIGSERIAL    PRIMARY KEY,
     policy_key      VARCHAR(255) NOT NULL UNIQUE,
     policy_name     VARCHAR(255) NOT NULL,
@@ -51,7 +51,7 @@ CREATE TABLE nexus_rls_policy (
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_rls_policy_object ON nexus_rls_policy(object_key, is_active);
+CREATE INDEX IF NOT EXISTS idx_rls_policy_object ON nexus_rls_policy(object_key, is_active);
 
 -- ── Data contracts ────────────────────────────────────────────────────────────
 -- Rules that every LLM-generated query against a table must satisfy.
@@ -71,7 +71,7 @@ CREATE INDEX idx_rls_policy_object ON nexus_rls_policy(object_key, is_active);
 --   BLOCK          → reject query, return explanation to user
 --   WARN           → log violation, allow execution
 --   AUTO_REMEDIATE → rewrite SQL to add missing constraint and proceed
-CREATE TABLE nexus_data_contract (
+CREATE TABLE IF NOT EXISTS nexus_data_contract (
     id            BIGSERIAL    PRIMARY KEY,
     contract_key  VARCHAR(255) NOT NULL UNIQUE,
     contract_name VARCHAR(255) NOT NULL,
@@ -92,7 +92,7 @@ CREATE TABLE nexus_data_contract (
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_contract_object ON nexus_data_contract(object_key, is_active);
+CREATE INDEX IF NOT EXISTS idx_contract_object ON nexus_data_contract(object_key, is_active);
 
 -- ── User attributes for RLS template resolution ───────────────────────────────
 -- Admins set per-user attributes (region, department, cost_centre, etc.)
