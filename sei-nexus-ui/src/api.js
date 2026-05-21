@@ -237,6 +237,50 @@ export const api = {
     run:    (key)        => post(`/reports/${key}/run`),
   },
 
+  // ── Governance Hub ─────────────────────────────────────────────────────────
+  governance: {
+    columnPolicies: {
+      list:   ()           => get('/governance/column-policies'),
+      create: (body)       => post('/governance/column-policies', body),
+      delete: (key)        => del(`/governance/column-policies/${key}`),
+    },
+    rlsPolicies: {
+      list:      ()            => get('/governance/rls-policies'),
+      create:    (body)        => post('/governance/rls-policies', body),
+      setActive: (key, active) => patch(`/governance/rls-policies/${key}/status`, { isActive: active }),
+      delete:    (key)         => del(`/governance/rls-policies/${key}`),
+    },
+    contracts: {
+      list:   ()           => get('/governance/contracts'),
+      create: (body)       => post('/governance/contracts', body),
+      delete: (key)        => del(`/governance/contracts/${key}`),
+    },
+    users: {
+      getAttributes: (email)        => get(`/governance/users/${encodeURIComponent(email)}/attributes`),
+      setAttributes: (email, attrs) => put(`/governance/users/${encodeURIComponent(email)}/attributes`, attrs),
+    },
+    audit: {
+      list:   (params = {}) => {
+        const q = new URLSearchParams();
+        if (params.userEmail)    q.set('userEmail',    params.userEmail);
+        if (params.eventType)    q.set('eventType',    params.eventType);
+        if (params.connectionKey) q.set('connectionKey', params.connectionKey);
+        if (params.from)         q.set('from',         params.from);
+        if (params.to)           q.set('to',           params.to);
+        if (params.page != null) q.set('page',         params.page);
+        if (params.size != null) q.set('size',         params.size);
+        return get(`/governance/audit?${q.toString()}`);
+      },
+      export: (params = {}) => {
+        const q = new URLSearchParams();
+        if (params.userEmail) q.set('userEmail', params.userEmail);
+        if (params.eventType) q.set('eventType', params.eventType);
+        return get(`/governance/audit/export?${q.toString()}`);
+      },
+    },
+    simulate: (body) => post('/governance/simulate', body),
+  },
+
   // ── Proactive Alerts ───────────────────────────────────────────────────────
   alerts: {
     list:        (limit = 50)  => get(`/alerts?limit=${limit}`),

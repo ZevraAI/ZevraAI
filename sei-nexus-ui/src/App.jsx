@@ -16,6 +16,7 @@ import Agents from './pages/Agents.jsx';
 import Reasoning from './pages/Reasoning.jsx';
 import Temporal from './pages/Temporal.jsx';
 import KnowledgeGaps from './pages/KnowledgeGaps.jsx';
+import Governance from './pages/Governance.jsx';
 
 // ─── Auth context ─────────────────────────────────────────────────────────────
 export const AuthContext = createContext(null);
@@ -52,6 +53,7 @@ const ROUTES = {
   '/temporal':     <Temporal />,
   '/reports':      <Reports />,
   '/gaps':         <KnowledgeGaps />,
+  '/governance':   <Governance />,
 };
 
 function normalizeAuth(payload) {

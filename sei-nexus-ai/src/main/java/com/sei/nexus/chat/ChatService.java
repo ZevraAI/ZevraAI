@@ -12,6 +12,15 @@ import com.sei.nexus.common.NexusException;
 import com.sei.nexus.attachment.ChatAttachment;
 import com.sei.nexus.attachment.ChatAttachmentRepository;
 import com.sei.nexus.connection.ConnectionRepository;
+import com.sei.nexus.governance.AuditContext;
+import com.sei.nexus.governance.ColumnMaskingService;
+import com.sei.nexus.governance.ContractResult;
+import com.sei.nexus.governance.DataContractService;
+import com.sei.nexus.governance.GovernanceAuditService;
+import com.sei.nexus.governance.MaskResult;
+import com.sei.nexus.governance.RlsResult;
+import com.sei.nexus.governance.RowLevelSecurityService;
+import com.sei.nexus.governance.UserAttributesRepository;
 import com.sei.nexus.enterprise.EnterpriseMapService;
 import com.sei.nexus.knowledge.KnowledgeGap;
 import com.sei.nexus.knowledge.KnowledgeGapRepository;
@@ -62,6 +71,12 @@ public class ChatService {
     private final AzureOpenAiClient        aiClient;
     private final ObjectMapper             objectMapper;
     private final ChatAttachmentRepository attachmentRepository;
+    // ── Governance chain (Phase 1) ────────────────────────────────────────────
+    private final DataContractService      dataContractService;
+    private final RowLevelSecurityService  rowLevelSecurityService;
+    private final ColumnMaskingService     columnMaskingService;
+    private final GovernanceAuditService   governanceAuditService;
+    private final UserAttributesRepository userAttributesRepository;
 
     public ChatService(RunRepository runRepository,
                        DocumentMemoryService documentMemoryService,
@@ -78,23 +93,33 @@ public class ChatService {
                        KnowledgeGraphService knowledgeGraphService,
                        AzureOpenAiClient aiClient,
                        ObjectMapper objectMapper,
-                       ChatAttachmentRepository attachmentRepository) {
-        this.runRepository        = runRepository;
-        this.documentMemoryService = documentMemoryService;
-        this.enterpriseMapService  = enterpriseMapService;
-        this.semanticService       = semanticService;
-        this.agentRepository       = agentRepository;
-        this.connectionRepository  = connectionRepository;
-        this.queryGovernanceService    = queryGovernanceService;
-        this.queryExecutionRepository  = queryExecutionRepository;
-        this.dynamicSqlService     = dynamicSqlService;
-        this.reasoningRepository   = reasoningRepository;
-        this.baselineService       = baselineService;
-        this.knowledgeGapRepository = knowledgeGapRepository;
-        this.knowledgeGraphService  = knowledgeGraphService;
-        this.aiClient              = aiClient;
-        this.objectMapper          = objectMapper;
-        this.attachmentRepository  = attachmentRepository;
+                       ChatAttachmentRepository attachmentRepository,
+                       DataContractService dataContractService,
+                       RowLevelSecurityService rowLevelSecurityService,
+                       ColumnMaskingService columnMaskingService,
+                       GovernanceAuditService governanceAuditService,
+                       UserAttributesRepository userAttributesRepository) {
+        this.runRepository            = runRepository;
+        this.documentMemoryService    = documentMemoryService;
+        this.enterpriseMapService     = enterpriseMapService;
+        this.semanticService          = semanticService;
+        this.agentRepository          = agentRepository;
+        this.connectionRepository     = connectionRepository;
+        this.queryGovernanceService   = queryGovernanceService;
+        this.queryExecutionRepository = queryExecutionRepository;
+        this.dynamicSqlService        = dynamicSqlService;
+        this.reasoningRepository      = reasoningRepository;
+        this.baselineService          = baselineService;
+        this.knowledgeGapRepository   = knowledgeGapRepository;
+        this.knowledgeGraphService    = knowledgeGraphService;
+        this.aiClient                 = aiClient;
+        this.objectMapper             = objectMapper;
+        this.attachmentRepository     = attachmentRepository;
+        this.dataContractService      = dataContractService;
+        this.rowLevelSecurityService  = rowLevelSecurityService;
+        this.columnMaskingService     = columnMaskingService;
+        this.governanceAuditService   = governanceAuditService;
+        this.userAttributesRepository = userAttributesRepository;
     }
 
     // =========================================================================
@@ -312,20 +337,63 @@ public class ChatService {
                             asyncOps.add(Map.of("execution_key", gov.executionKey(),
                                     "description", desc, "status", "QUEUED"));
                         } else {
-                            // EXECUTE_SYNC
+                            // EXECUTE_SYNC — run governance chain before execution
+                            long startMs = System.currentTimeMillis();
+                            List<String> objectKeyList = parseObjectKeys(objKeys);
+
+                            // 1. Data contracts: may BLOCK, WARN, or rewrite SQL
+                            ContractResult contract = dataContractService.evaluate(gov.approvedSql(), objectKeyList);
+                            if (contract.isBlocked()) {
+                                String reason = contract.violationMessages().isEmpty()
+                                        ? "Query blocked by data contract."
+                                        : String.join("; ", contract.violationMessages());
+                                execResults.add(Map.of("step", stepNo, "blocked", true, "reason", reason));
+                                AuditContext blockedCtx = AuditContext
+                                        .of(userEmail, userAttributesRepository.getRole(userEmail), runKey, connKey)
+                                        .addObjectKeys(objectKeyList)
+                                        .originalSql(gov.approvedSql())
+                                        .executedSql(gov.approvedSql())
+                                        .applyContractResult(contract);
+                                governanceAuditService.record(blockedCtx, true);
+                                stepNo++;
+                                continue;
+                            }
+                            String sqlAfterContract = contract.effectiveSql(gov.approvedSql());
+
+                            // 2. Row-level security: inject WHERE conditions
+                            RlsResult rls = rowLevelSecurityService.apply(sqlAfterContract, userEmail, objectKeyList);
+
+                            // 3. Column masking: rewrite SELECT clause
+                            MaskResult mask = columnMaskingService.apply(rls.sql(), userEmail, objectKeyList);
+
+                            // Build audit context from all governance decisions
+                            AuditContext auditCtx = AuditContext
+                                    .of(userEmail, userAttributesRepository.getRole(userEmail), runKey, connKey)
+                                    .addObjectKeys(objectKeyList)
+                                    .originalSql(gov.approvedSql())
+                                    .executedSql(mask.sql())
+                                    .applyContractResult(contract)
+                                    .applyRlsResult(rls)
+                                    .applyMaskResult(mask);
+
                             try {
                                 queryExecutionRepository.updateStatus(gov.executionKey(), "RUNNING", Instant.now(), null, null);
                                 List<Map<String, Object>> rows = dynamicSqlService.executeQuery(
-                                        connKey, gov.approvedSql(), gov.rowLimit());
+                                        connKey, mask.sql(), gov.rowLimit());
                                 String rJson = objectMapper.writeValueAsString(rows);
                                 queryExecutionRepository.updateResult(gov.executionKey(), rJson, "SUCCESS", Instant.now());
                                 execResults.add(Map.of("step", stepNo, "rows", rows,
-                                        "sql", gov.approvedSql(), "execution_key", gov.executionKey()));
+                                        "sql", mask.sql(), "execution_key", gov.executionKey()));
                                 resultSnapshot = rJson;
+
+                                auditCtx.rowCount(rows.size())
+                                        .executionMs((int)(System.currentTimeMillis() - startMs));
+                                governanceAuditService.record(auditCtx, false);
                             } catch (Exception ex) {
                                 queryExecutionRepository.updateStatus(gov.executionKey(), "FAILED",
                                         null, Instant.now(), ex.getMessage());
                                 execResults.add(Map.of("step", stepNo, "error", ex.getMessage()));
+                                governanceAuditService.record(auditCtx, false);
                             }
                         }
                         stepNo++;
@@ -856,6 +924,20 @@ public class ChatService {
     // =========================================================================
     // Utility helpers
     // =========================================================================
+
+    /**
+     * Parses a comma-separated string of object keys from an investigation plan step
+     * into a List for use by the governance chain.
+     */
+    private List<String> parseObjectKeys(String objKeys) {
+        if (objKeys == null || objKeys.isBlank()) return List.of();
+        List<String> result = new java.util.ArrayList<>();
+        for (String key : objKeys.split(",")) {
+            String trimmed = key.trim();
+            if (!trimmed.isEmpty()) result.add(trimmed);
+        }
+        return result;
+    }
 
     private List<String> toDomainKeyList(NexusAgent agent) {
         if (agent == null || agent.domainKeys() == null || agent.domainKeys().isBlank()) return List.of();
