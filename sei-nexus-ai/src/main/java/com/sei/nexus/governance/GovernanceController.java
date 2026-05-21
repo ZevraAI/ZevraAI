@@ -220,8 +220,13 @@ public class GovernanceController {
         long total = auditRepo.countFiltered(
                 userEmail, eventType, connectionKey, fromInstant, toInstant);
 
+        // Serialise each AuditEvent to a snake_case Map — consistent with every
+        // other endpoint in this codebase. Returning Java records directly produces
+        // camelCase keys; the frontend reads snake_case.
+        List<Map<String, Object>> eventMaps = events.stream().map(this::toAuditMap).toList();
+
         Map<String, Object> response = new LinkedHashMap<>();
-        response.put("events", events);
+        response.put("events", eventMaps);
         response.put("total", total);
         response.put("page",  page);
         response.put("size",  size);
@@ -391,6 +396,30 @@ public class GovernanceController {
         m.put("is_active",        p.isActive());
         m.put("created_by",       p.createdBy());
         m.put("created_at",       p.createdAt() != null ? p.createdAt().toString() : null);
+        return m;
+    }
+
+    private Map<String, Object> toAuditMap(AuditEvent e) {
+        var m = new LinkedHashMap<String, Object>();
+        m.put("event_key",              e.eventKey());
+        m.put("event_type",             e.eventType());
+        m.put("user_email",             e.userEmail());
+        m.put("user_role",              e.userRole());
+        m.put("run_key",                e.runKey());
+        m.put("connection_key",         e.connectionKey());
+        m.put("object_keys",            e.objectKeys()           != null ? e.objectKeys()           : new String[0]);
+        m.put("columns_accessed",       e.columnsAccessed()      != null ? e.columnsAccessed()      : new String[0]);
+        m.put("columns_masked",         e.columnsMasked()        != null ? e.columnsMasked()        : new String[0]);
+        m.put("rls_policies_applied",   e.rlsPoliciesApplied()   != null ? e.rlsPoliciesApplied()   : new String[0]);
+        m.put("contracts_checked",      e.contractsChecked()     != null ? e.contractsChecked()     : new String[0]);
+        m.put("contracts_violated",     e.contractsViolated()    != null ? e.contractsViolated()    : new String[0]);
+        m.put("original_sql",           e.originalSql());
+        m.put("executed_sql",           e.executedSql());
+        m.put("row_count_returned",     e.rowCountReturned());
+        m.put("rows_filtered_by_rls",   e.rowsFilteredByRls());
+        m.put("execution_ms",           e.executionMs());
+        m.put("ip_address",             e.ipAddress());
+        m.put("created_at",             e.createdAt() != null ? e.createdAt().toString() : null);
         return m;
     }
 

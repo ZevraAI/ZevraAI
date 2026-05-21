@@ -762,55 +762,55 @@ function AuditLogTab() {
                 <TableHead cols={['Time', 'User', 'Event', 'Tables', 'Rows', 'Modified', '']} />
                 <tbody>
                   {events.map(e => (
-                    <React.Fragment key={e.eventKey}>
+                    <React.Fragment key={e.event_key}>
                       <tr className="border-t border-gray-50 hover:bg-gray-50 transition-colors cursor-pointer"
-                          onClick={() => setExpanded(expanded === e.eventKey ? null : e.eventKey)}>
-                        <td className="px-4 py-3 text-[12px] text-gray-500 whitespace-nowrap">{timeAgo(e.createdAt)}</td>
-                        <td className="px-4 py-3 text-[13px] text-gray-700">{e.userEmail || '—'}</td>
+                          onClick={() => setExpanded(expanded === e.event_key ? null : e.event_key)}>
+                        <td className="px-4 py-3 text-[12px] text-gray-500 whitespace-nowrap">{timeAgo(e.created_at)}</td>
+                        <td className="px-4 py-3 text-[13px] text-gray-700">{e.user_email || '—'}</td>
                         <td className="px-4 py-3">
-                          <Badge text={e.eventType} color={EVENT_COLORS[e.eventType] || 'bg-gray-100 text-gray-600'} />
+                          <Badge text={e.event_type} color={EVENT_COLORS[e.event_type] || 'bg-gray-100 text-gray-600'} />
                         </td>
                         <td className="px-4 py-3 text-[12px] text-gray-500 max-w-[160px] truncate">
-                          {e.objectKeys?.join(', ') || '—'}
+                          {e.object_keys?.join(', ') || '—'}
                         </td>
-                        <td className="px-4 py-3 text-[12px] text-gray-500">{e.rowCountReturned ?? '—'}</td>
+                        <td className="px-4 py-3 text-[12px] text-gray-500">{e.row_count_returned ?? '—'}</td>
                         <td className="px-4 py-3 text-[12px]">
-                          {(e.columnsMasked?.length > 0 || e.rlsPoliciesApplied?.length > 0) ? (
+                          {(e.columns_masked?.length > 0 || e.rls_policies_applied?.length > 0) ? (
                             <span className="text-amber-600 font-medium flex items-center gap-1"><Shield size={11} /> Yes</span>
                           ) : <span className="text-gray-300">No</span>}
                         </td>
                         <td className="px-4 py-3">
-                          <ChevronDown size={13} className={`text-gray-400 transition-transform ${expanded === e.eventKey ? 'rotate-180' : ''}`} />
+                          <ChevronDown size={13} className={`text-gray-400 transition-transform ${expanded === e.event_key ? 'rotate-180' : ''}`} />
                         </td>
                       </tr>
-                      {expanded === e.eventKey && (
+                      {expanded === e.event_key && (
                         <tr className="bg-gray-50 border-t border-gray-100">
                           <td colSpan={7} className="px-4 py-4">
                             <div className="grid grid-cols-2 gap-4 text-[12px]">
                               <div>
                                 <p className="font-semibold text-gray-500 mb-1 uppercase tracking-wide text-[10px]">Original SQL</p>
-                                {formatSql(e.originalSql)}
+                                {formatSql(e.original_sql)}
                               </div>
                               <div>
                                 <p className="font-semibold text-gray-500 mb-1 uppercase tracking-wide text-[10px]">Executed SQL</p>
-                                {formatSql(e.executedSql)}
+                                {formatSql(e.executed_sql)}
                               </div>
-                              {e.columnsMasked?.length > 0 && (
+                              {e.columns_masked?.length > 0 && (
                                 <div>
                                   <p className="font-semibold text-gray-500 mb-1 uppercase tracking-wide text-[10px]">Columns masked</p>
-                                  <p className="text-amber-700">{e.columnsMasked.join(', ')}</p>
+                                  <p className="text-amber-700">{e.columns_masked.join(', ')}</p>
                                 </div>
                               )}
-                              {e.rlsPoliciesApplied?.length > 0 && (
+                              {e.rls_policies_applied?.length > 0 && (
                                 <div>
                                   <p className="font-semibold text-gray-500 mb-1 uppercase tracking-wide text-[10px]">RLS policies applied</p>
-                                  <p className="text-violet-700">{e.rlsPoliciesApplied.join(', ')}</p>
+                                  <p className="text-violet-700">{e.rls_policies_applied.join(', ')}</p>
                                 </div>
                               )}
-                              {e.contractsViolated?.length > 0 && (
+                              {e.contracts_violated?.length > 0 && (
                                 <div>
                                   <p className="font-semibold text-gray-500 mb-1 uppercase tracking-wide text-[10px]">Contracts violated</p>
-                                  <p className="text-orange-700">{e.contractsViolated.join(', ')}</p>
+                                  <p className="text-orange-700">{e.contracts_violated.join(', ')}</p>
                                 </div>
                               )}
                             </div>
