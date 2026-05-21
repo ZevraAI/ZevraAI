@@ -24,5 +24,9 @@ public record ChatResponse(
         // Each entry: {stepNo, description, rowCount, rowSummary, evaluatorDecision,
         //              evaluatorRationale, sql, executionMs}
         // Empty list when the session used single-shot planning.
-        List<Map<String, Object>> reasoningSteps
+        List<Map<String, Object>> reasoningSteps,
+        // Business terms Zevra learned from this team and applied to this query.
+        // Shown as a subtle badge in the chat UI for transparency.
+        // Empty when no learned context was available.
+        List<String> learningsApplied
 ) {}

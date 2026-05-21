@@ -148,6 +148,13 @@ export const api = {
     createVocab:     (body)         => post('/semantic/vocabulary', body),
     discover:             (body)          => post('/semantic/discover', body),
     discoverRelationships:(body)          => post('/semantic/discover-relationships', body),
+    // ── Phase 3: Semantic Learning endpoints ─────────────────────────────────
+    learnings: {
+      list:    (domainKey) => get(`/semantic/learnings${domainKey ? `?domainKey=${encodeURIComponent(domainKey)}` : ''}`),
+      update:  (key, body) => patch(`/semantic/learnings/${key}`, body),
+      promote: (key)       => post(`/semantic/learnings/${key}/promote`),
+      delete:  (key)       => del(`/semantic/learnings/${key}`),
+    },
   },
 
   // ── Agents ─────────────────────────────────────────────────────────────────

@@ -5,7 +5,7 @@ import {
   Layers, Plus, ChevronDown, ChevronRight,
   ArrowLeftRight, BookOpen, Pencil, Trash2,
   Sparkles, Database, Check, X, ChevronLeft,
-  AlertCircle, Search,
+  AlertCircle, Search, Brain,
 } from 'lucide-react';
 
 function safeArray(v) { return Array.isArray(v) ? v : []; }
@@ -912,6 +912,10 @@ export default function Semantic() {
   const [loading, setLoading]         = useState(false);
   const [tab, setTab]                 = useState('entities');
   const [selectedEntityKey, setSelectedEntityKey] = useState(null);
+  const [learnings, setLearnings]     = useState([]);
+  const [learningsLoading, setLearningsLoading] = useState(false);
+  const [editLearning, setEditLearning] = useState(null);
+  const [editSqlPattern, setEditSqlPattern] = useState('');
 
   // discovery wizard
   const [showWizard, setShowWizard] = useState(false);
@@ -964,6 +968,17 @@ export default function Semantic() {
     if (!selectedDomain) return;
     reload(selectedDomain);
   }, [selectedDomain]);
+
+  const loadLearnings = async (dk) => {
+    setLearningsLoading(true);
+    try { setLearnings(await api.semantic.learnings.list(dk)); }
+    catch { setLearnings([]); }
+    finally { setLearningsLoading(false); }
+  };
+
+  useEffect(() => {
+    if (tab === 'learned' && selectedDomain) loadLearnings(selectedDomain);
+  }, [tab, selectedDomain]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const reload = async (dk) => {
     const key = dk || selectedDomain;
@@ -1099,10 +1114,12 @@ export default function Semantic() {
         {/* Sidebar header */}
         <div className="px-4 py-3.5 border-b border-gray-200/70 flex items-center justify-between flex-shrink-0">
           <span className="text-[13px] font-semibold text-[#111827]">
-            {tab === 'entities' ? `Entities (${entities.length})` : `Vocabulary (${vocab.length})`}
+            {tab === 'entities' ? `Entities (${entities.length})`
+             : tab === 'vocab'  ? `Vocabulary (${vocab.length})`
+             : `Learned (${learnings.length})`}
           </span>
           <button
-            onClick={tab === 'entities' ? openAddEntity : openAddVocab}
+            onClick={tab === 'entities' ? openAddEntity : tab === 'vocab' ? openAddVocab : undefined}
             className="flex items-center gap-1 px-[8px] py-[4px] bg-[#111827] text-white
                        text-[11.5px] font-medium rounded-[6px] hover:bg-[#1F2937] transition-colors">
             <Plus size={10} /> Add
@@ -1111,11 +1128,11 @@ export default function Semantic() {
 
         {/* Tab toggle */}
         <div className="flex border-b border-gray-200/70 flex-shrink-0">
-          {[['entities', 'Entities'], ['vocab', 'Vocabulary']].map(([k, l]) => (
+          {[['entities', 'Entities'], ['vocab', 'Vocabulary'], ['learned', 'Learned']].map(([k, l]) => (
             <button key={k} onClick={() => setTab(k)}
-              className={`flex-1 py-2 text-[12px] font-medium transition-colors
+              className={`flex-1 py-2 text-[11.5px] font-medium transition-colors flex items-center justify-center gap-1
                 ${tab === k ? 'text-emerald-600 border-b-2 border-emerald-500' : 'text-[#9CA3AF] hover:text-[#374151]'}`}>
-              {l}
+              {k === 'learned' && <Brain size={10} />}{l}
             </button>
           ))}
         </div>
@@ -1134,7 +1151,7 @@ export default function Semantic() {
 
         {/* List */}
         <div className="overflow-y-auto flex-1">
-          {loading ? (
+          {(loading && tab !== 'learned') || (learningsLoading && tab === 'learned') ? (
             <div className="flex justify-center py-10"><Spinner /></div>
           ) : tab === 'entities' ? (
             entities.length === 0 ? (
@@ -1155,7 +1172,7 @@ export default function Semantic() {
                 </div>
               );
             })
-          ) : (
+          ) : tab === 'vocab' ? (
             vocab.length === 0 ? (
               <div className="px-4 py-8 text-center text-[12px] text-[#9CA3AF]">No vocabulary yet</div>
             ) : vocab.map(v => (
@@ -1163,6 +1180,58 @@ export default function Semantic() {
                 className="px-4 py-3 cursor-pointer border-b border-gray-100/80 hover:bg-gray-50/60 transition-colors">
                 <div className="text-[13px] font-medium text-[#111827]">{v.term}</div>
                 <div className="text-[11px] text-[#9CA3AF] mt-0.5 truncate">{v.definition}</div>
+              </div>
+            ))
+          ) : (
+            /* Learned tab — inline list with actions */
+            learnings.length === 0 ? (
+              <div className="px-4 py-8 text-center">
+                <Brain size={24} className="mx-auto mb-2 text-gray-300" />
+                <p className="text-[12px] text-[#9CA3AF]">No learnings yet</p>
+                <p className="text-[11px] text-[#9CA3AF] mt-1">Ask questions — Zevra learns your vocabulary automatically</p>
+              </div>
+            ) : learnings.map(m => (
+              <div key={m.mapping_key}
+                className="px-4 py-3 border-b border-gray-100/80 hover:bg-gray-50/50 transition-colors group">
+                <div className="flex items-start justify-between gap-2">
+                  <span className="text-[13px] font-semibold text-[#111827]">"{m.business_term}"</span>
+                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0
+                    ${m.promoted ? 'bg-emerald-50 text-emerald-700'
+                     : m.source === 'USER_CORRECTION' ? 'bg-amber-50 text-amber-700'
+                     : m.source === 'POSITIVE_FEEDBACK' ? 'bg-blue-50 text-blue-700'
+                     : 'bg-gray-100 text-gray-500'}`}>
+                    {m.promoted ? 'Promoted' : m.source === 'USER_CORRECTION' ? 'Corrected'
+                     : m.source === 'POSITIVE_FEEDBACK' ? 'Reinforced' : 'Learned'}
+                  </span>
+                </div>
+                <p className="text-[11px] font-mono text-gray-500 mt-0.5 truncate">{m.sql_pattern}</p>
+                {/* Confidence bar */}
+                <div className="mt-1.5 flex items-center gap-2">
+                  <div className="flex-1 h-1 bg-gray-100 rounded-full overflow-hidden">
+                    <div className="h-full bg-emerald-400 rounded-full transition-all"
+                      style={{ width: `${Math.round(m.confidence * 100)}%` }} />
+                  </div>
+                  <span className="text-[10px] text-gray-400 w-8 text-right">
+                    {Math.round(m.confidence * 100)}%
+                  </span>
+                  <span className="text-[10px] text-gray-400">{m.use_count}×</span>
+                </div>
+                {/* Inline actions (visible on hover) */}
+                <div className="mt-2 flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                  {!m.promoted && (
+                    <button onClick={async () => {
+                      await api.semantic.learnings.promote(m.mapping_key);
+                      loadLearnings(selectedDomain);
+                    }} className="text-[10.5px] text-emerald-600 hover:underline">Promote</button>
+                  )}
+                  <button onClick={() => { setEditLearning(m); setEditSqlPattern(m.sql_pattern); }}
+                    className="text-[10.5px] text-blue-600 hover:underline">Edit SQL</button>
+                  <button onClick={async () => {
+                    if (!window.confirm(`Delete learned term "${m.business_term}"?`)) return;
+                    await api.semantic.learnings.delete(m.mapping_key);
+                    loadLearnings(selectedDomain);
+                  }} className="text-[10.5px] text-red-500 hover:underline">Delete</button>
+                </div>
               </div>
             ))
           )}
@@ -1178,7 +1247,7 @@ export default function Semantic() {
         </div>
       </aside>
 
-      {/* ── Right content: entity detail or vocab list ────────────────────── */}
+      {/* ── Right content: entity detail, vocab list, or learnings summary ── */}
       {tab === 'entities' ? (
         <EntityDetailPanel
           entity={entities.find(e => e.entity_key === selectedEntityKey) ?? null}
@@ -1186,6 +1255,80 @@ export default function Semantic() {
           onEdit={openEditEntity}
           onDelete={deleteEntity}
         />
+      ) : tab === 'learned' ? (
+        <div className="flex-1 min-w-0 overflow-y-auto p-7">
+          <div className="max-w-2xl">
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-10 h-10 rounded-2xl bg-emerald-50 flex items-center justify-center">
+                <Brain size={20} className="text-emerald-600" />
+              </div>
+              <div>
+                <h2 className="text-[18px] font-bold text-[#111827] tracking-tight">Semantic Learning</h2>
+                <p className="text-[13px] text-[#9CA3AF]">
+                  Terms Zevra has learned from your team's queries — auto-applied to future SQL planning.
+                </p>
+              </div>
+            </div>
+
+            {/* Stats summary */}
+            <div className="grid grid-cols-3 gap-4 mb-8">
+              {[
+                { label: 'Total learned', value: learnings.length },
+                { label: 'Promoted to vocabulary', value: learnings.filter(m => m.promoted).length },
+                { label: 'Avg confidence', value: learnings.length
+                    ? Math.round(learnings.reduce((s, m) => s + m.confidence, 0) / learnings.length * 100) + '%'
+                    : '—' },
+              ].map(({ label, value }) => (
+                <div key={label} className="bg-white rounded-xl border border-gray-100 p-4 text-center">
+                  <p className="text-[22px] font-black text-[#111827]">{value}</p>
+                  <p className="text-[11.5px] text-[#9CA3AF] mt-0.5">{label}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="bg-white rounded-xl border border-gray-100 p-5">
+              <h3 className="text-[13px] font-semibold text-[#374151] mb-3">How it works</h3>
+              <ul className="space-y-2.5 text-[12.5px] text-[#6B7280] leading-relaxed">
+                <li className="flex gap-2"><span className="text-emerald-500 font-bold">✓</span>After every successful query, Zevra extracts business terms and maps them to their SQL equivalents.</li>
+                <li className="flex gap-2"><span className="text-emerald-500 font-bold">✓</span>Terms are injected into the SQL planner automatically — your vocabulary improves without manual work.</li>
+                <li className="flex gap-2"><span className="text-emerald-500 font-bold">✓</span>When you correct a wrong answer, the related term's confidence decreases.</li>
+                <li className="flex gap-2"><span className="text-emerald-500 font-bold">✓</span>Terms reaching 80% confidence with 10+ uses are promoted to the formal vocabulary automatically.</li>
+                <li className="flex gap-2"><span className="text-emerald-500 font-bold">✓</span>Click <strong>Promote</strong> on any term to move it to the vocabulary immediately.</li>
+              </ul>
+            </div>
+
+            {/* Edit SQL modal */}
+            {editLearning && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={e => { if (e.target === e.currentTarget) setEditLearning(null); }}>
+                <div className="bg-white rounded-2xl shadow-2xl border border-gray-200 w-full max-w-lg p-6">
+                  <h2 className="text-[15px] font-bold text-[#111827] mb-1">Edit SQL pattern</h2>
+                  <p className="text-[12.5px] text-gray-500 mb-4">
+                    Term: <strong>"{editLearning.business_term}"</strong>
+                  </p>
+                  <textarea
+                    value={editSqlPattern}
+                    onChange={e => setEditSqlPattern(e.target.value)}
+                    rows={3}
+                    className="w-full rounded-xl border border-gray-200 px-3 py-2.5 text-[13px] font-mono text-gray-800 focus:outline-none focus:border-emerald-400 resize-none"
+                  />
+                  <div className="flex gap-2.5 mt-4">
+                    <button onClick={() => setEditLearning(null)}
+                      className="flex-1 h-9 rounded-xl border border-gray-200 text-[13px] font-medium text-gray-600 hover:bg-gray-50 transition-colors">
+                      Cancel
+                    </button>
+                    <button onClick={async () => {
+                      await api.semantic.learnings.update(editLearning.mapping_key, { sqlPattern: editSqlPattern });
+                      setEditLearning(null);
+                      loadLearnings(selectedDomain);
+                    }} className="flex-1 h-9 rounded-xl bg-[#0C5847] text-white text-[13px] font-semibold hover:bg-[#084B3D] transition-colors">
+                      Save
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       ) : (
         <div className="flex-1 min-w-0 overflow-y-auto p-7">
           {vocab.length === 0 ? (

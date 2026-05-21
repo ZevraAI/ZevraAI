@@ -11,6 +11,7 @@ import com.sei.nexus.query.QueryExecution;
 import com.sei.nexus.query.QueryExecutionRepository;
 import com.sei.nexus.run.NexusRun;
 import com.sei.nexus.run.RunRepository;
+import com.sei.nexus.semantic.SemanticLearningService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -30,6 +31,7 @@ public class ChatController {
     private final RunRepository runRepository;
     private final QueryExecutionRepository queryExecutionRepository;
     private final KnowledgeGapRepository knowledgeGapRepository;
+    private final SemanticLearningService semanticLearningService;
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
 
@@ -37,12 +39,14 @@ public class ChatController {
                           RunRepository runRepository,
                           QueryExecutionRepository queryExecutionRepository,
                           KnowledgeGapRepository knowledgeGapRepository,
+                          SemanticLearningService semanticLearningService,
                           JdbcTemplate jdbc,
                           ObjectMapper objectMapper) {
         this.chatService = chatService;
         this.runRepository = runRepository;
         this.queryExecutionRepository = queryExecutionRepository;
         this.knowledgeGapRepository = knowledgeGapRepository;
+        this.semanticLearningService = semanticLearningService;
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
     }
@@ -80,6 +84,15 @@ public class ChatController {
         String evidenceKey = Keys.uniqueKey("ev");
         runRepository.saveEvidence(evidenceKey, runKey, "FEEDBACK",
                 "{\"rating\":\"" + rating + "\",\"comment\":" + jsonString(comment) + "}");
+
+        // Positive feedback → reinforce any learned term mappings applied to this run
+        if ("POSITIVE".equalsIgnoreCase(rating) || "THUMBS_UP".equalsIgnoreCase(rating)
+                || "HELPFUL".equalsIgnoreCase(rating)) {
+            NexusRun run = runRepository.findByKey(runKey).orElse(null);
+            if (run != null) {
+                semanticLearningService.reinforceFromFeedback(runKey, run.domainKey());
+            }
+        }
 
         // If KNOWLEDGE_GAP rating, create a knowledge gap record
         if ("KNOWLEDGE_GAP".equalsIgnoreCase(rating)) {

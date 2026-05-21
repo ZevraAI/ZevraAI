@@ -32,6 +32,8 @@ import com.sei.nexus.reasoning.ReasoningRepository;
 import com.sei.nexus.reasoning.ReasoningSession;
 import com.sei.nexus.run.NexusRun;
 import com.sei.nexus.run.RunRepository;
+import com.sei.nexus.semantic.LearningContextBuilder;
+import com.sei.nexus.semantic.SemanticLearningService;
 import com.sei.nexus.semantic.SemanticService;
 import com.sei.nexus.sql.DynamicSqlService;
 import com.sei.nexus.graph.KnowledgeGraphService;
@@ -77,6 +79,9 @@ public class ChatService {
     // ── Multi-step reasoning (Phase 2) ───────────────────────────────────────
     private final ReasoningEngine          reasoningEngine;
     private final ReasoningEventBus        reasoningEventBus;
+    // ── Semantic learning (Phase 3) ───────────────────────────────────────────
+    private final SemanticLearningService  semanticLearningService;
+    private final LearningContextBuilder   learningContextBuilder;
 
     public ChatService(RunRepository runRepository,
                        DocumentMemoryService documentMemoryService,
@@ -100,7 +105,9 @@ public class ChatService {
                        GovernanceAuditService governanceAuditService,
                        UserAttributesRepository userAttributesRepository,
                        ReasoningEngine reasoningEngine,
-                       ReasoningEventBus reasoningEventBus) {
+                       ReasoningEventBus reasoningEventBus,
+                       SemanticLearningService semanticLearningService,
+                       LearningContextBuilder learningContextBuilder) {
         this.runRepository            = runRepository;
         this.documentMemoryService    = documentMemoryService;
         this.enterpriseMapService     = enterpriseMapService;
@@ -124,6 +131,8 @@ public class ChatService {
         this.userAttributesRepository = userAttributesRepository;
         this.reasoningEngine          = reasoningEngine;
         this.reasoningEventBus        = reasoningEventBus;
+        this.semanticLearningService  = semanticLearningService;
+        this.learningContextBuilder   = learningContextBuilder;
     }
 
     // =========================================================================
@@ -216,7 +225,7 @@ public class ChatService {
                         "Use /request-source to request workflow integrations.";
                 runRepository.update(runKey, ans, "READ_ONLY_BOUNDARY", "COMPLETE", null);
                 return buildResponse(conversationId, runKey, ans, "READ_ONLY_BOUNDARY",
-                        agent, routingConfidence, false, List.of(), List.of(), List.of(), List.of());
+                        agent, routingConfidence, false, List.of(), List.of(), List.of(), List.of(), List.of());
             }
 
             // STEP 9: Prior result check
@@ -233,6 +242,7 @@ public class ChatService {
             List<Map<String, Object>> asyncOps        = new ArrayList<>();
             List<Map<String, Object>> queryData        = new ArrayList<>();
             List<Map<String, Object>> reasoningSteps   = new ArrayList<>();
+            List<String>              learningsApplied  = new ArrayList<>();
             String resultSnapshot = null;
 
             switch (decisionType) {
@@ -286,6 +296,15 @@ public class ChatService {
                             anomalyCtx, false, history, agent);
                     if (!playbookCtx.isBlank()) schemaCtx = schemaCtx + "\nPlaybook:\n" + playbookCtx;
 
+                    // ── Phase 3: inject learned business vocabulary into the planner context ──
+                    String agentDomainKey = agent != null ? agent.domainKeys() : null;
+                    LearningContextBuilder.LearningContext learningCtx =
+                            learningContextBuilder.build(agentDomainKey, conversationId);
+                    if (!learningCtx.isEmpty()) {
+                        schemaCtx = schemaCtx + "\n\n" + learningCtx.contextText();
+                        learningsApplied.addAll(learningCtx.termsApplied());
+                    }
+
                     // Run the iterative reasoning loop (Phase 2).
                     // The engine generates one SQL step at a time, executes it through the
                     // governance chain, evaluates whether the evidence is sufficient, and
@@ -305,6 +324,18 @@ public class ChatService {
                     // Notify SSE clients the answer is ready, then close the stream
                     reasoningEventBus.publish(runKey, "answer_ready", Map.of("answer", answer));
                     reasoningEventBus.complete(runKey);
+
+                    // ── Phase 3: fire-and-forget learning from this successful run ──
+                    // Pick the SQL from the most data-rich step for term extraction.
+                    String bestSql = reasonResult.evidence().getSteps().stream()
+                            .filter(s -> !s.rows().isEmpty() && s.sql() != null)
+                            .max(java.util.Comparator.comparingInt(s -> s.rows().size()))
+                            .map(s -> s.sql())
+                            .orElse(null);
+                    if (bestSql != null) {
+                        semanticLearningService.learnFromRun(
+                                runKey, raw, bestSql, agentDomainKey, conversationId);
+                    }
 
                     // Collect step summaries for the frontend reasoning trace
                     for (EvidenceStore.StepEvidence s : reasonResult.evidence().getSteps()) {
@@ -332,7 +363,8 @@ public class ChatService {
 
             List<Map<String, Object>> quickRefs = buildQuickRefinements(decisionType, raw);
             return buildResponse(conversationId, runKey, answer, decisionType,
-                    agent, routingConfidence, "KNOWLEDGE_GAP".equals(decisionType), quickRefs, asyncOps, queryData, reasoningSteps);
+                    agent, routingConfidence, "KNOWLEDGE_GAP".equals(decisionType),
+                    quickRefs, asyncOps, queryData, reasoningSteps, learningsApplied);
 
         } catch (Exception e) {
             log.error("Chat orchestration failed for run {}: {}", runKey, e.getMessage(), e);
@@ -778,7 +810,7 @@ public class ChatService {
                 "KNOWLEDGE_PROPOSAL", "COMPLETE", null);
         return buildResponse(convId, runKey,
                 "Your knowledge proposal has been submitted for review by the domain owner. Ref: " + gapKey,
-                "KNOWLEDGE_PROPOSAL", null, 1.0, false, List.of(), List.of(), List.of(), List.of());
+                "KNOWLEDGE_PROPOSAL", null, 1.0, false, List.of(), List.of(), List.of(), List.of(), List.of());
     }
 
     private ChatResponse handleSourceRequest(String text, String userEmail) {
@@ -794,7 +826,7 @@ public class ChatService {
         runRepository.update(runKey, "Source request submitted.", "SOURCE_REQUEST", "COMPLETE", null);
         return buildResponse(convId, runKey,
                 "Your source request has been submitted for review. Ref: " + gapKey,
-                "SOURCE_REQUEST", null, 1.0, false, List.of(), List.of(), List.of(), List.of());
+                "SOURCE_REQUEST", null, 1.0, false, List.of(), List.of(), List.of(), List.of(), List.of());
     }
 
     // =========================================================================
@@ -804,7 +836,8 @@ public class ChatService {
     private ChatResponse buildResponse(String conversationId, String runKey, String answer,
             String decisionType, NexusAgent agent, double confidence, boolean needsKnowledge,
             List<Map<String, Object>> quickRefs, List<Map<String, Object>> asyncOps,
-            List<Map<String, Object>> queryData, List<Map<String, Object>> reasoningSteps) {
+            List<Map<String, Object>> queryData, List<Map<String, Object>> reasoningSteps,
+            List<String> learningsApplied) {
         String evidenceMode = (decisionType.contains("QUERY") || decisionType.contains("HYBRID"))
                 ? "LIVE_DATA" : "MEMORY";
         OrchestratorDecision decision = new OrchestratorDecision(
@@ -822,7 +855,8 @@ public class ChatService {
                 confidence, needsKnowledge, "",
                 quickRefs, asyncOps,
                 queryData        != null ? queryData        : List.of(),
-                reasoningSteps   != null ? reasoningSteps   : List.of());
+                reasoningSteps   != null ? reasoningSteps   : List.of(),
+                learningsApplied != null ? learningsApplied : List.of());
     }
 
     /** Converts EvidenceStore steps to the execResults format expected by composeAnswer. */

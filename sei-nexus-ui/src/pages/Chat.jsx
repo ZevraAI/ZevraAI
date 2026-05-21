@@ -582,7 +582,7 @@ function UserMessage({ text, attachment }) {
   );
 }
 
-function AssistantMessage({ content, decisionType, loading, exportMenu, queryData, quickRefinements, onAsk, reasoningSteps }) {
+function AssistantMessage({ content, decisionType, loading, exportMenu, queryData, quickRefinements, onAsk, reasoningSteps, learningsApplied }) {
   return (
     <div className="flex justify-start">
       <div className="flex items-start gap-2.5 w-full">
@@ -604,10 +604,24 @@ function AssistantMessage({ content, decisionType, loading, exportMenu, queryDat
               {queryData?.length > 0 && <DataViz queryData={queryData} />}
               <SuggestedQuestions quickRefinements={quickRefinements} queryData={queryData} onAsk={onAsk} />
               <ReasoningTrace steps={reasoningSteps} loading={false} />
-              {decisionType && (
-                <div className="mt-2.5 pt-2.5 border-t border-[#F0EDE8] flex items-center gap-1.5">
-                  <span className="text-[10px] text-[#8A96A6]">via</span>
-                  <span className="text-[10px] font-medium text-[#0C5847]">{decisionType}</span>
+              {(decisionType || reasoningSteps?.length > 0) && (
+                <div className="mt-2.5 pt-2.5 border-t border-[#F0EDE8] flex items-center gap-2 flex-wrap">
+                  {decisionType && (
+                    <>
+                      <span className="text-[10px] text-[#8A96A6]">via</span>
+                      <span className="text-[10px] font-medium text-[#0C5847]">{decisionType}</span>
+                    </>
+                  )}
+                  {reasoningSteps?.length > 0 && (
+                    <span className="text-[10px] text-[#8A96A6]">· {reasoningSteps.length} step{reasoningSteps.length !== 1 ? 's' : ''}</span>
+                  )}
+                  {reasoningSteps?.length > 0 && <span className="text-[#8A96A6] text-[10px]">·</span>}
+                  {learningsApplied?.length > 0 && (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full"
+                      title={`Learned terms applied: ${learningsApplied.join(', ')}`}>
+                      🧠 {learningsApplied.length} learned term{learningsApplied.length !== 1 ? 's' : ''} applied
+                    </span>
+                  )}
                 </div>
               )}
             </>
@@ -1041,7 +1055,8 @@ export default function Chat({ prefillQuestion = null, onPrefillUsed = null }) {
           decisionType: response.decision?.type || response.decision_type,
           queryData: response.query_data || response.queryData || null,
           quickRefinements: response.quick_refinements || response.quickRefinements || [],
-          reasoningSteps: response.reasoning_steps || response.reasoningSteps || [],
+          reasoningSteps:   response.reasoning_steps   || response.reasoningSteps   || [],
+          learningsApplied: response.learnings_applied || response.learningsApplied || [],
           loading: false,
         };
         return next;
@@ -1443,6 +1458,7 @@ export default function Chat({ prefillQuestion = null, onPrefillUsed = null }) {
                       queryData={msg.queryData}
                       quickRefinements={msg.quickRefinements}
                       reasoningSteps={msg.reasoningSteps || []}
+                      learningsApplied={msg.learningsApplied || []}
                       onAsk={q => sendQuestion(q)}
                       exportMenu={
                         <ExportMenu
