@@ -12,15 +12,14 @@ import com.sei.nexus.common.NexusException;
 import com.sei.nexus.attachment.ChatAttachment;
 import com.sei.nexus.attachment.ChatAttachmentRepository;
 import com.sei.nexus.connection.ConnectionRepository;
-import com.sei.nexus.governance.AuditContext;
 import com.sei.nexus.governance.ColumnMaskingService;
-import com.sei.nexus.governance.ContractResult;
 import com.sei.nexus.governance.DataContractService;
 import com.sei.nexus.governance.GovernanceAuditService;
-import com.sei.nexus.governance.MaskResult;
-import com.sei.nexus.governance.RlsResult;
 import com.sei.nexus.governance.RowLevelSecurityService;
 import com.sei.nexus.governance.UserAttributesRepository;
+import com.sei.nexus.reasoning.EvidenceStore;
+import com.sei.nexus.reasoning.ReasoningEngine;
+import com.sei.nexus.reasoning.ReasoningEventBus;
 import com.sei.nexus.enterprise.EnterpriseMapService;
 import com.sei.nexus.knowledge.KnowledgeGap;
 import com.sei.nexus.knowledge.KnowledgeGapRepository;
@@ -28,11 +27,9 @@ import com.sei.nexus.memory.DocumentChunk;
 import com.sei.nexus.memory.DocumentMemoryService;
 import com.sei.nexus.query.QueryExecutionRepository;
 import com.sei.nexus.query.QueryGovernanceService;
-import com.sei.nexus.reasoning.Hypothesis;
 import com.sei.nexus.reasoning.OperationalFinding;
 import com.sei.nexus.reasoning.ReasoningRepository;
 import com.sei.nexus.reasoning.ReasoningSession;
-import com.sei.nexus.reasoning.ReasoningStep;
 import com.sei.nexus.run.NexusRun;
 import com.sei.nexus.run.RunRepository;
 import com.sei.nexus.semantic.SemanticService;
@@ -77,6 +74,9 @@ public class ChatService {
     private final ColumnMaskingService     columnMaskingService;
     private final GovernanceAuditService   governanceAuditService;
     private final UserAttributesRepository userAttributesRepository;
+    // ── Multi-step reasoning (Phase 2) ───────────────────────────────────────
+    private final ReasoningEngine          reasoningEngine;
+    private final ReasoningEventBus        reasoningEventBus;
 
     public ChatService(RunRepository runRepository,
                        DocumentMemoryService documentMemoryService,
@@ -98,7 +98,9 @@ public class ChatService {
                        RowLevelSecurityService rowLevelSecurityService,
                        ColumnMaskingService columnMaskingService,
                        GovernanceAuditService governanceAuditService,
-                       UserAttributesRepository userAttributesRepository) {
+                       UserAttributesRepository userAttributesRepository,
+                       ReasoningEngine reasoningEngine,
+                       ReasoningEventBus reasoningEventBus) {
         this.runRepository            = runRepository;
         this.documentMemoryService    = documentMemoryService;
         this.enterpriseMapService     = enterpriseMapService;
@@ -120,6 +122,8 @@ public class ChatService {
         this.columnMaskingService     = columnMaskingService;
         this.governanceAuditService   = governanceAuditService;
         this.userAttributesRepository = userAttributesRepository;
+        this.reasoningEngine          = reasoningEngine;
+        this.reasoningEventBus        = reasoningEventBus;
     }
 
     // =========================================================================
@@ -212,7 +216,7 @@ public class ChatService {
                         "Use /request-source to request workflow integrations.";
                 runRepository.update(runKey, ans, "READ_ONLY_BOUNDARY", "COMPLETE", null);
                 return buildResponse(conversationId, runKey, ans, "READ_ONLY_BOUNDARY",
-                        agent, routingConfidence, false, List.of(), List.of(), List.of());
+                        agent, routingConfidence, false, List.of(), List.of(), List.of(), List.of());
             }
 
             // STEP 9: Prior result check
@@ -226,8 +230,9 @@ public class ChatService {
             String decisionType = (String) decision.getOrDefault("type", "ANSWER_FROM_MEMORY");
 
             String answer;
-            List<Map<String, Object>> asyncOps = new ArrayList<>();
-            List<Map<String, Object>> queryData = new ArrayList<>();
+            List<Map<String, Object>> asyncOps        = new ArrayList<>();
+            List<Map<String, Object>> queryData        = new ArrayList<>();
+            List<Map<String, Object>> reasoningSteps   = new ArrayList<>();
             String resultSnapshot = null;
 
             switch (decisionType) {
@@ -269,151 +274,49 @@ public class ChatService {
                             raw, null, "ACTIVE", null, null, Instant.now(), null);
                     reasoningRepository.saveSession(session);
 
-                    // Playbook context
+                    // Build schema context string for the iterative planner.
+                    // enrichedQuestion (with attachment content) is passed separately so
+                    // the planner can extract WHERE IN values from uploaded files.
                     String playbookCtx = "";
                     if (agent != null) {
                         List<AgentPlaybook> playbooks = agentRepository.findPlaybooksByAgent(agent.agentKey());
-                        if (!playbooks.isEmpty()) {
-                            playbookCtx = "Playbook steps: " + playbooks.get(0).investigationSteps();
-                        }
+                        if (!playbooks.isEmpty()) playbookCtx = "Playbook: " + playbooks.get(0).investigationSteps();
                     }
+                    String schemaCtx = buildContextSummary(memChunks, entCtx, semCtx, findings,
+                            anomalyCtx, false, history, agent);
+                    if (!playbookCtx.isBlank()) schemaCtx = schemaCtx + "\nPlaybook:\n" + playbookCtx;
 
-                    // Generate investigation plan — enrichedQuestion gives the SQL planner
-                    // the file content so it can extract IDs/values for WHERE IN clauses.
-                    String planJson = generateInvestigationPlan(enrichedQuestion, entCtx, semCtx,
-                            memChunks, findings, anomalyCtx, playbookCtx, history, agent);
-                    List<Map<String, Object>> steps = parsePlan(planJson);
+                    // Run the iterative reasoning loop (Phase 2).
+                    // The engine generates one SQL step at a time, executes it through the
+                    // governance chain, evaluates whether the evidence is sufficient, and
+                    // continues until the evaluator says SUFFICIENT, DEAD_END, or MAX_STEPS.
+                    ReasoningEngine.ReasoningResult reasonResult = reasoningEngine.reason(
+                            raw, enrichedQuestion, sessionKey, schemaCtx, runKey, userEmail, forceAsync);
 
-                    // Initial hypothesis
-                    String hypText = generateHypothesisText(raw, agent);
-                    Hypothesis hyp = new Hypothesis(Keys.uniqueKey("hyp"), sessionKey, hypText,
-                            0.5, "[]", "[]", "ACTIVE", Instant.now(), null);
-                    reasoningRepository.saveHypothesis(hyp);
+                    resultSnapshot = reasonResult.resultSnapshot();
+                    queryData      = reasonResult.queryData();
 
-                    List<Map<String, Object>> execResults = new ArrayList<>();
-                    int stepNo = 1;
+                    // Convert EvidenceStore steps to the execResults format composeAnswer expects
+                    List<Map<String, Object>> execResults = evidenceToExecResults(reasonResult.evidence());
 
-                    for (Map<String, Object> step : steps) {
-                        String sql = (String) step.get("sql");
-                        String connKey = (String) step.get("connection_key");
-                        String objKeys = step.containsKey("object_keys") ? (String) step.get("object_keys") : "";
-                        String desc = step.containsKey("description") ? (String) step.get("description") : "Step " + stepNo;
+                    answer = composeAnswer(raw, attachmentSummary, execResults, memChunks, semCtx,
+                            findings, anomalyCtx, agent, "HYBRID_DOC_AND_DATA".equals(decisionType));
 
-                        if (sql == null || connKey == null || connKey.isBlank()) {
-                            stepNo++;
-                            continue;
-                        }
+                    // Notify SSE clients the answer is ready, then close the stream
+                    reasoningEventBus.publish(runKey, "answer_ready", Map.of("answer", answer));
+                    reasoningEventBus.complete(runKey);
 
-                        // Validate the connection key exists before handing to governance.
-                        // The AI sometimes invents a key from context (table name, group label).
-                        // Skip the step gracefully rather than throwing a 500.
-                        if (connectionRepository.findByKeyOrName(connKey).isEmpty()) {
-                            log.warn("Step {} skipped — connection '{}' is referenced by data objects " +
-                                     "but no longer exists in nexus_connection. " +
-                                     "The connection may have been deleted after onboarding.",
-                                     stepNo, connKey);
-                            execResults.add(Map.of("step", stepNo, "error",
-                                    "The database connection configured during onboarding (" + connKey + ") " +
-                                    "no longer exists. Please re-add the connection in the Connections page " +
-                                    "and then use POST /onboarding/reset to re-run onboarding."));
-                            stepNo++;
-                            continue;
-                        }
-
-                        var gov = queryGovernanceService.govern(runKey, stepNo,
-                                agent != null ? agent.agentKey() : "", connKey, objKeys, sql, forceAsync);
-
-                        // Record reasoning step
-                        ReasoningStep rStep = new ReasoningStep(Keys.uniqueKey("rstep"), sessionKey, stepNo,
-                                "DATA_CHECK", desc, "[]", null, 0.0, gov.executionKey(), Instant.now());
-                        reasoningRepository.saveStep(rStep);
-
-                        if ("BLOCK".equals(gov.route())) {
-                            execResults.add(Map.of("step", stepNo, "blocked", true, "reason", gov.decisionReason()));
-                        } else if ("ASK_FOR_FILTER".equals(gov.route())) {
-                            execResults.add(Map.of("step", stepNo, "needs_filter", true, "reason", gov.decisionReason()));
-                        } else if ("EXECUTE_ASYNC".equals(gov.route())) {
-                            queryExecutionRepository.updateStatus(gov.executionKey(), "QUEUED", null, null, null);
-                            asyncOps.add(Map.of("execution_key", gov.executionKey(),
-                                    "description", desc, "status", "QUEUED"));
-                        } else {
-                            // EXECUTE_SYNC — run governance chain before execution
-                            long startMs = System.currentTimeMillis();
-                            List<String> objectKeyList = parseObjectKeys(objKeys);
-
-                            // 1. Data contracts: may BLOCK, WARN, or rewrite SQL
-                            ContractResult contract = dataContractService.evaluate(gov.approvedSql(), objectKeyList);
-                            if (contract.isBlocked()) {
-                                String reason = contract.violationMessages().isEmpty()
-                                        ? "Query blocked by data contract."
-                                        : String.join("; ", contract.violationMessages());
-                                execResults.add(Map.of("step", stepNo, "blocked", true, "reason", reason));
-                                AuditContext blockedCtx = AuditContext
-                                        .of(userEmail, userAttributesRepository.getRole(userEmail), runKey, connKey)
-                                        .addObjectKeys(objectKeyList)
-                                        .originalSql(gov.approvedSql())
-                                        .executedSql(gov.approvedSql())
-                                        .applyContractResult(contract);
-                                governanceAuditService.record(blockedCtx, true);
-                                stepNo++;
-                                continue;
-                            }
-                            String sqlAfterContract = contract.effectiveSql(gov.approvedSql());
-
-                            // 2. Row-level security: inject WHERE conditions
-                            RlsResult rls = rowLevelSecurityService.apply(sqlAfterContract, userEmail, objectKeyList);
-
-                            // 3. Column masking: rewrite SELECT clause
-                            MaskResult mask = columnMaskingService.apply(rls.sql(), userEmail, objectKeyList);
-
-                            // Build audit context from all governance decisions
-                            AuditContext auditCtx = AuditContext
-                                    .of(userEmail, userAttributesRepository.getRole(userEmail), runKey, connKey)
-                                    .addObjectKeys(objectKeyList)
-                                    .originalSql(gov.approvedSql())
-                                    .executedSql(mask.sql())
-                                    .applyContractResult(contract)
-                                    .applyRlsResult(rls)
-                                    .applyMaskResult(mask);
-
-                            try {
-                                queryExecutionRepository.updateStatus(gov.executionKey(), "RUNNING", Instant.now(), null, null);
-                                List<Map<String, Object>> rows = dynamicSqlService.executeQuery(
-                                        connKey, mask.sql(), gov.rowLimit());
-                                String rJson = objectMapper.writeValueAsString(rows);
-                                queryExecutionRepository.updateResult(gov.executionKey(), rJson, "SUCCESS", Instant.now());
-                                execResults.add(Map.of("step", stepNo, "rows", rows,
-                                        "sql", mask.sql(), "execution_key", gov.executionKey()));
-                                resultSnapshot = rJson;
-
-                                auditCtx.rowCount(rows.size())
-                                        .executionMs((int)(System.currentTimeMillis() - startMs));
-                                governanceAuditService.record(auditCtx, false);
-                            } catch (Exception ex) {
-                                queryExecutionRepository.updateStatus(gov.executionKey(), "FAILED",
-                                        null, Instant.now(), ex.getMessage());
-                                execResults.add(Map.of("step", stepNo, "error", ex.getMessage()));
-                                governanceAuditService.record(auditCtx, false);
-                            }
-                        }
-                        stepNo++;
-                    }
-
-                    answer = composeAnswer(raw, attachmentSummary, execResults, memChunks, semCtx, findings, anomalyCtx,
-                            agent, "HYBRID_DOC_AND_DATA".equals(decisionType));
-                    reasoningRepository.updateSessionStatus(sessionKey, "CONCLUDED", answer, 0.8, Instant.now());
-
-                    // Collect rows from the first successful sync step for frontend visualisation.
-                    // Capped at 100 rows — the chart never needs more than that.
-                    for (Map<String, Object> r : execResults) {
-                        if (r.containsKey("rows")) {
-                            @SuppressWarnings("unchecked")
-                            List<Map<String, Object>> stepRows = (List<Map<String, Object>>) r.get("rows");
-                            if (!stepRows.isEmpty()) {
-                                queryData = stepRows.size() > 100 ? stepRows.subList(0, 100) : stepRows;
-                            }
-                            break;
-                        }
+                    // Collect step summaries for the frontend reasoning trace
+                    for (EvidenceStore.StepEvidence s : reasonResult.evidence().getSteps()) {
+                        reasoningSteps.add(Map.of(
+                                "stepNo",             s.stepNo(),
+                                "description",        s.description() != null ? s.description() : "",
+                                "sql",                s.sql()         != null ? s.sql()         : "",
+                                "rowCount",           s.rows().size(),
+                                "rowSummary",         s.rowSummary()          != null ? s.rowSummary()          : "",
+                                "evaluatorDecision",  s.evaluatorDecision()   != null ? s.evaluatorDecision()   : "",
+                                "evaluatorRationale", s.evaluatorRationale()  != null ? s.evaluatorRationale()  : "",
+                                "executionMs",        s.executionMs()));
                     }
                 }
                 default -> {
@@ -429,7 +332,7 @@ public class ChatService {
 
             List<Map<String, Object>> quickRefs = buildQuickRefinements(decisionType, raw);
             return buildResponse(conversationId, runKey, answer, decisionType,
-                    agent, routingConfidence, "KNOWLEDGE_GAP".equals(decisionType), quickRefs, asyncOps, queryData);
+                    agent, routingConfidence, "KNOWLEDGE_GAP".equals(decisionType), quickRefs, asyncOps, queryData, reasoningSteps);
 
         } catch (Exception e) {
             log.error("Chat orchestration failed for run {}: {}", runKey, e.getMessage(), e);
@@ -875,7 +778,7 @@ public class ChatService {
                 "KNOWLEDGE_PROPOSAL", "COMPLETE", null);
         return buildResponse(convId, runKey,
                 "Your knowledge proposal has been submitted for review by the domain owner. Ref: " + gapKey,
-                "KNOWLEDGE_PROPOSAL", null, 1.0, false, List.of(), List.of(), List.of());
+                "KNOWLEDGE_PROPOSAL", null, 1.0, false, List.of(), List.of(), List.of(), List.of());
     }
 
     private ChatResponse handleSourceRequest(String text, String userEmail) {
@@ -891,7 +794,7 @@ public class ChatService {
         runRepository.update(runKey, "Source request submitted.", "SOURCE_REQUEST", "COMPLETE", null);
         return buildResponse(convId, runKey,
                 "Your source request has been submitted for review. Ref: " + gapKey,
-                "SOURCE_REQUEST", null, 1.0, false, List.of(), List.of(), List.of());
+                "SOURCE_REQUEST", null, 1.0, false, List.of(), List.of(), List.of(), List.of());
     }
 
     // =========================================================================
@@ -901,7 +804,7 @@ public class ChatService {
     private ChatResponse buildResponse(String conversationId, String runKey, String answer,
             String decisionType, NexusAgent agent, double confidence, boolean needsKnowledge,
             List<Map<String, Object>> quickRefs, List<Map<String, Object>> asyncOps,
-            List<Map<String, Object>> queryData) {
+            List<Map<String, Object>> queryData, List<Map<String, Object>> reasoningSteps) {
         String evidenceMode = (decisionType.contains("QUERY") || decisionType.contains("HYBRID"))
                 ? "LIVE_DATA" : "MEMORY";
         OrchestratorDecision decision = new OrchestratorDecision(
@@ -918,7 +821,24 @@ public class ChatService {
                 agent != null ? agent.domainKeys() : null,
                 confidence, needsKnowledge, "",
                 quickRefs, asyncOps,
-                queryData != null ? queryData : List.of());
+                queryData        != null ? queryData        : List.of(),
+                reasoningSteps   != null ? reasoningSteps   : List.of());
+    }
+
+    /** Converts EvidenceStore steps to the execResults format expected by composeAnswer. */
+    private List<Map<String, Object>> evidenceToExecResults(EvidenceStore evidence) {
+        List<Map<String, Object>> results = new java.util.ArrayList<>();
+        for (EvidenceStore.StepEvidence s : evidence.getSteps()) {
+            if (!s.rows().isEmpty()) {
+                results.add(Map.of("step", s.stepNo(), "rows", s.rows(),
+                        "sql", s.sql() != null ? s.sql() : ""));
+            } else if (s.evaluatorDecision() != null &&
+                    (s.evaluatorDecision().contains("BLOCK") || "ERROR".equals(s.evaluatorDecision()))) {
+                results.add(Map.of("step", s.stepNo(), "error",
+                        s.evaluatorRationale() != null ? s.evaluatorRationale() : "Step failed"));
+            }
+        }
+        return results;
     }
 
     // =========================================================================

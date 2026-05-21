@@ -19,6 +19,7 @@ const QUICK_TILES = [
   { label: 'Reports',        path: '/reports',     gradient: 'bg-gradient-to-br from-indigo-100 to-indigo-200',   iconColor: '#4338CA', Icon: Users      },
 ];
 import DataViz from '../components/DataViz.jsx';
+import ReasoningTrace from '../components/ReasoningTrace.jsx';
 
 // ── markdown ──────────────────────────────────────────────────────────────────
 marked.setOptions({ breaks: true, gfm: true });
@@ -581,7 +582,7 @@ function UserMessage({ text, attachment }) {
   );
 }
 
-function AssistantMessage({ content, decisionType, loading, exportMenu, queryData, quickRefinements, onAsk }) {
+function AssistantMessage({ content, decisionType, loading, exportMenu, queryData, quickRefinements, onAsk, reasoningSteps }) {
   return (
     <div className="flex justify-start">
       <div className="flex items-start gap-2.5 w-full">
@@ -602,6 +603,7 @@ function AssistantMessage({ content, decisionType, loading, exportMenu, queryDat
               {queryData?.length > 0 && <DataTable rows={queryData} />}
               {queryData?.length > 0 && <DataViz queryData={queryData} />}
               <SuggestedQuestions quickRefinements={quickRefinements} queryData={queryData} onAsk={onAsk} />
+              <ReasoningTrace steps={reasoningSteps} loading={false} />
               {decisionType && (
                 <div className="mt-2.5 pt-2.5 border-t border-[#F0EDE8] flex items-center gap-1.5">
                   <span className="text-[10px] text-[#8A96A6]">via</span>
@@ -1039,6 +1041,7 @@ export default function Chat({ prefillQuestion = null, onPrefillUsed = null }) {
           decisionType: response.decision?.type || response.decision_type,
           queryData: response.query_data || response.queryData || null,
           quickRefinements: response.quick_refinements || response.quickRefinements || [],
+          reasoningSteps: response.reasoning_steps || response.reasoningSteps || [],
           loading: false,
         };
         return next;
@@ -1431,6 +1434,7 @@ export default function Chat({ prefillQuestion = null, onPrefillUsed = null }) {
                       loading={msg.loading}
                       queryData={msg.queryData}
                       quickRefinements={msg.quickRefinements}
+                      reasoningSteps={msg.reasoningSteps || []}
                       onAsk={q => sendQuestion(q)}
                       exportMenu={
                         <ExportMenu

@@ -186,13 +186,20 @@ function ColumnPoliciesTab({ objects }) {
                       <td className="px-4 py-3 text-[13px] font-mono text-gray-700">{p.objectKey}</td>
                       <td className="px-4 py-3 text-[13px] font-mono font-semibold text-gray-900">{p.columnName}</td>
                       <td className="px-4 py-3">
-                        <Badge text={p.maskType}
-                          color={p.maskType === 'EXCLUDE' ? 'bg-red-50 text-red-700'
-                               : p.maskType === 'HASH'    ? 'bg-blue-50 text-blue-700'
-                               : p.maskType === 'PARTIAL' ? 'bg-amber-50 text-amber-700'
-                               : 'bg-gray-100 text-gray-600'} />
-                        {p.maskType === 'PARTIAL' && <span className="ml-1.5 text-[11px] text-gray-400">{p.partialChars} chars</span>}
-                        {p.maskType === 'CONSTANT' && p.constantValue && <span className="ml-1.5 text-[11px] text-gray-400">→ "{p.constantValue}"</span>}
+                        <div className="flex items-center gap-1.5">
+                          <Badge text={p.maskType}
+                            color={p.maskType === 'EXCLUDE' ? 'bg-red-50 text-red-700'
+                                 : p.maskType === 'HASH'    ? 'bg-blue-50 text-blue-700'
+                                 : p.maskType === 'PARTIAL' ? 'bg-amber-50 text-amber-700'
+                                 : 'bg-gray-100 text-gray-600'} />
+                          {p.maskType === 'EXCLUDE' && (
+                            <span title="Column completely removed from results">
+                              <AlertTriangle size={12} className="text-red-400" />
+                            </span>
+                          )}
+                          {p.maskType === 'PARTIAL' && <span className="text-[11px] text-gray-400">{p.partialChars} chars</span>}
+                          {p.maskType === 'CONSTANT' && p.constantValue && <span className="text-[11px] text-gray-400">→ "{p.constantValue}"</span>}
+                        </div>
                       </td>
                       <td className="px-4 py-3 text-[12px] text-gray-500">
                         {p.exemptRoles?.length > 0 ? p.exemptRoles.join(', ') : <span className="text-gray-300">None</span>}
@@ -236,6 +243,21 @@ function ColumnPoliciesTab({ objects }) {
                 ))}
               </div>
             </div>
+            {/* EXCLUDE warning — shown immediately after mask type selection */}
+            {form.maskType === 'EXCLUDE' && (
+              <div className="flex items-start gap-3 p-3.5 bg-red-50 border border-red-200 rounded-xl">
+                <AlertTriangle size={15} className="text-red-500 mt-0.5 shrink-0" />
+                <div>
+                  <p className="text-[13px] font-semibold text-red-800">Column will be completely removed</p>
+                  <p className="text-[12px] text-red-600 mt-0.5 leading-relaxed">
+                    This column will not appear in any query results — not even as a null value.
+                    Queries that explicitly reference it by name will return results without it.
+                    Use <strong>Hash</strong> or <strong>Constant</strong> if you need the column
+                    present but anonymised.
+                  </p>
+                </div>
+              </div>
+            )}
             {form.maskType === 'PARTIAL' && (
               <div>
                 <label className={labelCls}>Characters to show</label>
