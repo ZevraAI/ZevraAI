@@ -74,12 +74,12 @@ public class GovernanceController {
     // ── Column Policies ───────────────────────────────────────────────────────
 
     @GetMapping("/column-policies")
-    public ResponseEntity<List<ColumnPolicy>> listColumnPolicies() {
-        return ResponseEntity.ok(columnPolicyRepo.findAll());
+    public ResponseEntity<List<Map<String, Object>>> listColumnPolicies() {
+        return ResponseEntity.ok(columnPolicyRepo.findAll().stream().map(this::toMap).toList());
     }
 
     @PostMapping("/column-policies")
-    public ResponseEntity<ColumnPolicy> createColumnPolicy(@RequestBody Map<String, Object> body) {
+    public ResponseEntity<Map<String, Object>> createColumnPolicy(@RequestBody Map<String, Object> body) {
         String userEmail = currentUserEmail();
         ColumnPolicy policy = new ColumnPolicy(
                 null,
@@ -91,7 +91,25 @@ public class GovernanceController {
                 toStringArray(body.get("exemptRoles")),
                 userEmail,
                 Instant.now(), Instant.now());
-        return ResponseEntity.status(HttpStatus.CREATED).body(columnPolicyRepo.save(policy));
+        return ResponseEntity.status(HttpStatus.CREATED).body(toMap(columnPolicyRepo.save(policy)));
+    }
+
+    @PatchMapping("/column-policies/{policyKey}")
+    public ResponseEntity<Map<String, Object>> updateColumnPolicy(@PathVariable String policyKey,
+                                                                   @RequestBody Map<String, Object> body) {
+        ColumnPolicy existing = columnPolicyRepo.findByKey(policyKey)
+                .orElseThrow(() -> new NexusException(HttpStatus.NOT_FOUND, "Policy not found: " + policyKey));
+        ColumnPolicy updated = new ColumnPolicy(
+                policyKey,
+                existing.objectKey(),
+                existing.columnName(),
+                strOr(body, "maskType",      existing.maskType()),
+                body.containsKey("constantValue") ? (String) body.get("constantValue") : existing.constantValue(),
+                body.containsKey("partialChars")  ? intOr(body, "partialChars", existing.partialChars()) : existing.partialChars(),
+                body.containsKey("exemptRoles")   ? toStringArray(body.get("exemptRoles")) : existing.exemptRoles(),
+                existing.createdBy(),
+                existing.createdAt(), Instant.now());
+        return ResponseEntity.ok(toMap(columnPolicyRepo.save(updated)));
     }
 
     @DeleteMapping("/column-policies/{policyKey}")
@@ -103,12 +121,12 @@ public class GovernanceController {
     // ── Row-Level Security Policies ───────────────────────────────────────────
 
     @GetMapping("/rls-policies")
-    public ResponseEntity<List<RlsPolicy>> listRlsPolicies() {
-        return ResponseEntity.ok(rlsPolicyRepo.findAll());
+    public ResponseEntity<List<Map<String, Object>>> listRlsPolicies() {
+        return ResponseEntity.ok(rlsPolicyRepo.findAll().stream().map(this::toRlsMap).toList());
     }
 
     @PostMapping("/rls-policies")
-    public ResponseEntity<RlsPolicy> createRlsPolicy(@RequestBody Map<String, Object> body) {
+    public ResponseEntity<Map<String, Object>> createRlsPolicy(@RequestBody Map<String, Object> body) {
         String userEmail = currentUserEmail();
         RlsPolicy policy = new RlsPolicy(
                 null,
@@ -119,7 +137,7 @@ public class GovernanceController {
                 boolOr(body, "isActive", true),
                 userEmail,
                 Instant.now(), Instant.now());
-        return ResponseEntity.status(HttpStatus.CREATED).body(rlsPolicyRepo.save(policy));
+        return ResponseEntity.status(HttpStatus.CREATED).body(toRlsMap(rlsPolicyRepo.save(policy)));
     }
 
     @PatchMapping("/rls-policies/{policyKey}/status")
@@ -139,12 +157,12 @@ public class GovernanceController {
     // ── Data Contracts ────────────────────────────────────────────────────────
 
     @GetMapping("/contracts")
-    public ResponseEntity<List<DataContract>> listContracts() {
-        return ResponseEntity.ok(contractRepo.findAll());
+    public ResponseEntity<List<Map<String, Object>>> listContracts() {
+        return ResponseEntity.ok(contractRepo.findAll().stream().map(this::toContractMap).toList());
     }
 
     @PostMapping("/contracts")
-    public ResponseEntity<DataContract> createContract(@RequestBody Map<String, Object> body) {
+    public ResponseEntity<Map<String, Object>> createContract(@RequestBody Map<String, Object> body) {
         String userEmail = currentUserEmail();
         Object configRaw = body.getOrDefault("ruleConfig", Map.of());
         JsonNode config = objectMapper.valueToTree(configRaw);
@@ -159,7 +177,7 @@ public class GovernanceController {
                 boolOr(body, "isActive", true),
                 userEmail,
                 Instant.now(), Instant.now());
-        return ResponseEntity.status(HttpStatus.CREATED).body(contractRepo.save(contract));
+        return ResponseEntity.status(HttpStatus.CREATED).body(toContractMap(contractRepo.save(contract)));
     }
 
     @DeleteMapping("/contracts/{contractKey}")
@@ -342,5 +360,51 @@ public class GovernanceController {
         if (value == null) return "";
         String escaped = value.replace("\"", "\"\"").replace("\n", " ").replace("\r", "");
         return escaped.contains(",") || escaped.contains("\"") ? "\"" + escaped + "\"" : escaped;
+    }
+
+    // ── Record → snake_case Map serialisers ───────────────────────────────────
+    // The rest of this API returns explicit Maps with snake_case keys.
+    // Returning records directly would give camelCase, causing blank cells
+    // in the frontend which consistently reads snake_case field names.
+
+    private Map<String, Object> toMap(ColumnPolicy p) {
+        var m = new LinkedHashMap<String, Object>();
+        m.put("policy_key",     p.policyKey());
+        m.put("object_key",     p.objectKey());
+        m.put("column_name",    p.columnName());
+        m.put("mask_type",      p.maskType());
+        m.put("constant_value", p.constantValue());
+        m.put("partial_chars",  p.partialChars());
+        m.put("exempt_roles",   p.exemptRoles() != null ? p.exemptRoles() : new String[0]);
+        m.put("created_by",     p.createdBy());
+        m.put("created_at",     p.createdAt() != null ? p.createdAt().toString() : null);
+        return m;
+    }
+
+    private Map<String, Object> toRlsMap(RlsPolicy p) {
+        var m = new LinkedHashMap<String, Object>();
+        m.put("policy_key",       p.policyKey());
+        m.put("policy_name",      p.policyName());
+        m.put("object_key",       p.objectKey());
+        m.put("filter_template",  p.filterTemplate());
+        m.put("applies_to_roles", p.appliesToRoles() != null ? p.appliesToRoles() : new String[0]);
+        m.put("is_active",        p.isActive());
+        m.put("created_by",       p.createdBy());
+        m.put("created_at",       p.createdAt() != null ? p.createdAt().toString() : null);
+        return m;
+    }
+
+    private Map<String, Object> toContractMap(DataContract c) {
+        var m = new LinkedHashMap<String, Object>();
+        m.put("contract_key",  c.contractKey());
+        m.put("contract_name", c.contractName());
+        m.put("object_key",    c.objectKey());
+        m.put("rule_type",     c.ruleType());
+        m.put("rule_config",   c.ruleConfig());
+        m.put("enforcement",   c.enforcement());
+        m.put("is_active",     c.isActive());
+        m.put("created_by",    c.createdBy());
+        m.put("created_at",    c.createdAt() != null ? c.createdAt().toString() : null);
+        return m;
     }
 }

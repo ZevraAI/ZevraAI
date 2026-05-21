@@ -242,6 +242,7 @@ export const api = {
     columnPolicies: {
       list:   ()           => get('/governance/column-policies'),
       create: (body)       => post('/governance/column-policies', body),
+      update: (key, body)  => patch(`/governance/column-policies/${key}`, body),
       delete: (key)        => del(`/governance/column-policies/${key}`),
     },
     rlsPolicies: {

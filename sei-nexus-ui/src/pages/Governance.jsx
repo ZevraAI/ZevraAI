@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   AlertTriangle, Check, ChevronDown, Clock, Download, Eye, EyeOff,
-  Filter, Hash, Layers, Lock, Plus, RefreshCw, Search, Shield,
+  Filter, Hash, Layers, Lock, Pencil, Plus, RefreshCw, Search, Shield,
   ShieldCheck, Trash2, X, Zap,
 } from 'lucide-react';
 import { api } from '../api.js';
@@ -114,15 +114,73 @@ const labelCls = 'block text-[11.5px] font-semibold text-gray-500 uppercase trac
 const btnPrimary = 'inline-flex items-center gap-2 px-4 py-2.5 bg-[#0C5847] hover:bg-[#084B3D] text-white text-[13px] font-semibold rounded-xl transition-all disabled:opacity-40 disabled:cursor-not-allowed';
 const btnGhost = 'inline-flex items-center gap-2 px-4 py-2.5 bg-white border border-gray-200 text-gray-700 text-[13px] font-semibold rounded-xl hover:bg-gray-50 transition-all';
 
+// ── shared mask form fields (used by both add and edit modals) ────────────────
+function MaskFormFields({ form, setForm }) {
+  return (
+    <>
+      <div>
+        <label className={labelCls}>Mask type *</label>
+        <div className="grid grid-cols-2 gap-2">
+          {MASK_TYPES.map(m => (
+            <button key={m.value} type="button" onClick={() => setForm(f => ({ ...f, maskType: m.value }))}
+              className={`p-3 rounded-xl border text-left transition-all ${form.maskType === m.value ? 'border-emerald-500 bg-emerald-50' : 'border-gray-200 hover:border-gray-300'}`}>
+              <p className={`text-[13px] font-semibold ${form.maskType === m.value ? 'text-emerald-800' : 'text-gray-700'}`}>{m.label}</p>
+              <p className="text-[11px] text-gray-400 mt-0.5 leading-snug">{m.desc}</p>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {form.maskType === 'EXCLUDE' && (
+        <div className="flex items-start gap-3 p-3.5 bg-red-50 border border-red-200 rounded-xl">
+          <AlertTriangle size={15} className="text-red-500 mt-0.5 shrink-0" />
+          <div>
+            <p className="text-[13px] font-semibold text-red-800">Column will be completely removed</p>
+            <p className="text-[12px] text-red-600 mt-0.5 leading-relaxed">
+              This column will not appear in any query results — not even as a null value.
+              Use <strong>Hash</strong> or <strong>Constant</strong> if you need it present but anonymised.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {form.maskType === 'PARTIAL' && (
+        <div>
+          <label className={labelCls}>Characters to show</label>
+          <input type="number" className={inputCls} min={1} max={20} value={form.partialChars}
+            onChange={e => setForm(f => ({ ...f, partialChars: e.target.value }))} />
+        </div>
+      )}
+
+      {form.maskType === 'CONSTANT' && (
+        <div>
+          <label className={labelCls}>Replacement value</label>
+          <input className={inputCls} placeholder="REDACTED" value={form.constantValue}
+            onChange={e => setForm(f => ({ ...f, constantValue: e.target.value }))} />
+        </div>
+      )}
+
+      <div>
+        <label className={labelCls}>Exempt roles <span className="normal-case font-normal text-gray-400">(comma-separated, blank = no exemptions)</span></label>
+        <input className={inputCls} placeholder="ADMIN, DATA_ANALYST" value={form.exemptRoles}
+          onChange={e => setForm(f => ({ ...f, exemptRoles: e.target.value }))} />
+      </div>
+    </>
+  );
+}
+
 // ── Tab: Column Policies ──────────────────────────────────────────────────────
 
-function ColumnPoliciesTab({ objects }) {
-  const [policies, setPolicies] = useState([]);
-  const [loading,  setLoading]  = useState(true);
-  const [showAdd,  setShowAdd]  = useState(false);
-  const [form,     setForm]     = useState({ objectKey: '', columnName: '', maskType: 'EXCLUDE', constantValue: '', partialChars: 3, exemptRoles: '' });
-  const [saving,   setSaving]   = useState(false);
-  const [error,    setError]    = useState('');
+const BLANK_FORM = { objectKey: '', columnName: '', maskType: 'EXCLUDE', constantValue: '', partialChars: 3, exemptRoles: '' };
+
+function ColumnPoliciesTab() {
+  const [policies,  setPolicies]  = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const [showAdd,   setShowAdd]   = useState(false);
+  const [editPolicy,setEditPolicy]= useState(null);   // policy object being edited
+  const [form,      setForm]      = useState(BLANK_FORM);
+  const [saving,    setSaving]    = useState(false);
+  const [error,     setError]     = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -133,19 +191,42 @@ function ColumnPoliciesTab({ objects }) {
 
   useEffect(() => { load(); }, [load]);
 
-  const save = async () => {
+  const formToBody = () => ({
+    maskType:      form.maskType,
+    constantValue: form.constantValue || null,
+    partialChars:  parseInt(form.partialChars) || 3,
+    exemptRoles:   form.exemptRoles ? form.exemptRoles.split(',').map(r => r.trim()).filter(Boolean) : [],
+  });
+
+  const saveNew = async () => {
     setSaving(true); setError('');
     try {
-      await api.governance.columnPolicies.create({
-        ...form,
-        partialChars: parseInt(form.partialChars) || 3,
-        exemptRoles: form.exemptRoles ? form.exemptRoles.split(',').map(r => r.trim()).filter(Boolean) : [],
-      });
-      setShowAdd(false);
-      setForm({ objectKey: '', columnName: '', maskType: 'EXCLUDE', constantValue: '', partialChars: 3, exemptRoles: '' });
-      load();
+      await api.governance.columnPolicies.create({ objectKey: form.objectKey, columnName: form.columnName, ...formToBody() });
+      setShowAdd(false); setForm(BLANK_FORM); load();
     } catch (e) { setError(e.message || 'Save failed'); }
     finally { setSaving(false); }
+  };
+
+  const saveEdit = async () => {
+    setSaving(true); setError('');
+    try {
+      await api.governance.columnPolicies.update(editPolicy.policy_key, formToBody());
+      setEditPolicy(null); setForm(BLANK_FORM); load();
+    } catch (e) { setError(e.message || 'Update failed'); }
+    finally { setSaving(false); }
+  };
+
+  const openEdit = p => {
+    setEditPolicy(p);
+    setForm({
+      objectKey:     p.object_key    || '',
+      columnName:    p.column_name   || '',
+      maskType:      p.mask_type     || 'EXCLUDE',
+      constantValue: p.constant_value || '',
+      partialChars:  p.partial_chars  ?? 3,
+      exemptRoles:   (p.exempt_roles || []).join(', '),
+    });
+    setError('');
   };
 
   const remove = async key => {
@@ -154,7 +235,11 @@ function ColumnPoliciesTab({ objects }) {
     load();
   };
 
-  const maskInfo = t => MASK_TYPES.find(m => m.value === t);
+  const maskColor = t =>
+    t === 'EXCLUDE'  ? 'bg-red-50 text-red-700'
+  : t === 'HASH'     ? 'bg-blue-50 text-blue-700'
+  : t === 'PARTIAL'  ? 'bg-amber-50 text-amber-700'
+  : 'bg-gray-100 text-gray-600';
 
   return (
     <div>
@@ -163,7 +248,7 @@ function ColumnPoliciesTab({ objects }) {
           <p className="text-[14px] font-semibold text-gray-800">Column Masking Policies</p>
           <p className="text-[12.5px] text-gray-400 mt-0.5">Control which columns are hidden, hashed, or redacted per data object.</p>
         </div>
-        <button onClick={() => setShowAdd(true)} className={btnPrimary}>
+        <button onClick={() => { setForm(BLANK_FORM); setError(''); setShowAdd(true); }} className={btnPrimary}>
           <Plus size={14} /> Add Policy
         </button>
       </div>
@@ -177,111 +262,103 @@ function ColumnPoliciesTab({ objects }) {
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full border-collapse">
-              <TableHead cols={['Object', 'Column', 'Mask type', 'Exempt roles', 'Added', '']} />
+              <TableHead cols={['Object', 'Column', 'Mask type', 'Exempt roles', 'Added by', '']} />
               <tbody>
-                {policies.map(p => {
-                  const mi = maskInfo(p.maskType);
-                  return (
-                    <tr key={p.policyKey} className="border-t border-gray-50 hover:bg-gray-50 transition-colors">
-                      <td className="px-4 py-3 text-[13px] font-mono text-gray-700">{p.objectKey}</td>
-                      <td className="px-4 py-3 text-[13px] font-mono font-semibold text-gray-900">{p.columnName}</td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-1.5">
-                          <Badge text={p.maskType}
-                            color={p.maskType === 'EXCLUDE' ? 'bg-red-50 text-red-700'
-                                 : p.maskType === 'HASH'    ? 'bg-blue-50 text-blue-700'
-                                 : p.maskType === 'PARTIAL' ? 'bg-amber-50 text-amber-700'
-                                 : 'bg-gray-100 text-gray-600'} />
-                          {p.maskType === 'EXCLUDE' && (
-                            <span title="Column completely removed from results">
-                              <AlertTriangle size={12} className="text-red-400" />
-                            </span>
-                          )}
-                          {p.maskType === 'PARTIAL' && <span className="text-[11px] text-gray-400">{p.partialChars} chars</span>}
-                          {p.maskType === 'CONSTANT' && p.constantValue && <span className="text-[11px] text-gray-400">→ "{p.constantValue}"</span>}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-[12px] text-gray-500">
-                        {p.exemptRoles?.length > 0 ? p.exemptRoles.join(', ') : <span className="text-gray-300">None</span>}
-                      </td>
-                      <td className="px-4 py-3 text-[12px] text-gray-400">{p.createdBy}</td>
-                      <td className="px-4 py-3">
-                        <button onClick={() => remove(p.policyKey)}
+                {policies.map(p => (
+                  <tr key={p.policy_key} className="border-t border-gray-50 hover:bg-gray-50 transition-colors">
+                    <td className="px-4 py-3 text-[13px] font-mono text-gray-700">{p.object_key}</td>
+                    <td className="px-4 py-3 text-[13px] font-mono font-semibold text-gray-900">{p.column_name}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1.5">
+                        <Badge text={p.mask_type} color={maskColor(p.mask_type)} />
+                        {p.mask_type === 'EXCLUDE' && (
+                          <span title="Column completely removed from results">
+                            <AlertTriangle size={12} className="text-red-400" />
+                          </span>
+                        )}
+                        {p.mask_type === 'PARTIAL'  && <span className="text-[11px] text-gray-400">{p.partial_chars} chars</span>}
+                        {p.mask_type === 'CONSTANT' && p.constant_value && <span className="text-[11px] text-gray-400">→ "{p.constant_value}"</span>}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-[12px] text-gray-500">
+                      {p.exempt_roles?.length > 0 ? p.exempt_roles.join(', ') : <span className="text-gray-300">None</span>}
+                    </td>
+                    <td className="px-4 py-3 text-[12px] text-gray-400">{p.created_by}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1">
+                        <button onClick={() => openEdit(p)}
+                          title="Edit mask settings"
+                          className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-300 hover:text-emerald-600 hover:bg-emerald-50 transition-colors">
+                          <Pencil size={12} />
+                        </button>
+                        <button onClick={() => remove(p.policy_key)}
+                          title="Delete policy"
                           className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-300 hover:text-red-500 hover:bg-red-50 transition-colors">
                           <Trash2 size={13} />
                         </button>
-                      </td>
-                    </tr>
-                  );
-                })}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
         )}
       </SectionCard>
 
+      {/* ── Add modal ── */}
       {showAdd && (
         <Modal title="Add Column Policy" onClose={() => setShowAdd(false)}>
           <div className="space-y-4">
-            <div>
-              <label className={labelCls}>Data object key *</label>
-              <input className={inputCls} placeholder="obj-orders" value={form.objectKey} onChange={e => setForm(f => ({ ...f, objectKey: e.target.value }))} />
-            </div>
-            <div>
-              <label className={labelCls}>Column name *</label>
-              <input className={inputCls} placeholder="email" value={form.columnName} onChange={e => setForm(f => ({ ...f, columnName: e.target.value }))} />
-            </div>
-            <div>
-              <label className={labelCls}>Mask type *</label>
-              <div className="grid grid-cols-2 gap-2">
-                {MASK_TYPES.map(m => (
-                  <button key={m.value} type="button" onClick={() => setForm(f => ({ ...f, maskType: m.value }))}
-                    className={`p-3 rounded-xl border text-left transition-all ${form.maskType === m.value ? 'border-emerald-500 bg-emerald-50' : 'border-gray-200 hover:border-gray-300'}`}>
-                    <p className={`text-[13px] font-semibold ${form.maskType === m.value ? 'text-emerald-800' : 'text-gray-700'}`}>{m.label}</p>
-                    <p className="text-[11px] text-gray-400 mt-0.5 leading-snug">{m.desc}</p>
-                  </button>
-                ))}
-              </div>
-            </div>
-            {/* EXCLUDE warning — shown immediately after mask type selection */}
-            {form.maskType === 'EXCLUDE' && (
-              <div className="flex items-start gap-3 p-3.5 bg-red-50 border border-red-200 rounded-xl">
-                <AlertTriangle size={15} className="text-red-500 mt-0.5 shrink-0" />
-                <div>
-                  <p className="text-[13px] font-semibold text-red-800">Column will be completely removed</p>
-                  <p className="text-[12px] text-red-600 mt-0.5 leading-relaxed">
-                    This column will not appear in any query results — not even as a null value.
-                    Queries that explicitly reference it by name will return results without it.
-                    Use <strong>Hash</strong> or <strong>Constant</strong> if you need the column
-                    present but anonymised.
-                  </p>
-                </div>
-              </div>
-            )}
-            {form.maskType === 'PARTIAL' && (
+            <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className={labelCls}>Characters to show</label>
-                <input type="number" className={inputCls} min={1} max={20} value={form.partialChars}
-                  onChange={e => setForm(f => ({ ...f, partialChars: e.target.value }))} />
+                <label className={labelCls}>Data object key *</label>
+                <input className={inputCls} placeholder="obj-orders" value={form.objectKey}
+                  onChange={e => setForm(f => ({ ...f, objectKey: e.target.value }))} />
               </div>
-            )}
-            {form.maskType === 'CONSTANT' && (
               <div>
-                <label className={labelCls}>Replacement value</label>
-                <input className={inputCls} placeholder="REDACTED" value={form.constantValue}
-                  onChange={e => setForm(f => ({ ...f, constantValue: e.target.value }))} />
+                <label className={labelCls}>Column name *</label>
+                <input className={inputCls} placeholder="email" value={form.columnName}
+                  onChange={e => setForm(f => ({ ...f, columnName: e.target.value }))} />
               </div>
-            )}
-            <div>
-              <label className={labelCls}>Exempt roles <span className="normal-case font-normal text-gray-400">(comma-separated, leave blank for no exemptions)</span></label>
-              <input className={inputCls} placeholder="ADMIN, DATA_ANALYST" value={form.exemptRoles}
-                onChange={e => setForm(f => ({ ...f, exemptRoles: e.target.value }))} />
             </div>
+            <MaskFormFields form={form} setForm={setForm} />
             {error && <p className="text-[12px] text-red-500">{error}</p>}
             <div className="flex gap-2.5 pt-1">
               <button className={btnGhost} onClick={() => setShowAdd(false)}>Cancel</button>
-              <button className={btnPrimary} disabled={saving || !form.objectKey || !form.columnName} onClick={save}>
+              <button className={btnPrimary} disabled={saving || !form.objectKey || !form.columnName} onClick={saveNew}>
                 {saving ? 'Saving…' : 'Save Policy'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Edit modal ── */}
+      {editPolicy && (
+        <Modal title="Edit Column Policy" onClose={() => setEditPolicy(null)}>
+          <div className="space-y-4">
+            {/* Object + column are read-only — they identify the policy */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelCls}>Data object key</label>
+                <div className="h-9 rounded-xl border border-gray-100 bg-gray-50 px-3 flex items-center text-[13px] text-gray-500 font-mono">
+                  {editPolicy.object_key}
+                </div>
+              </div>
+              <div>
+                <label className={labelCls}>Column name</label>
+                <div className="h-9 rounded-xl border border-gray-100 bg-gray-50 px-3 flex items-center text-[13px] text-gray-800 font-mono font-semibold">
+                  {editPolicy.column_name}
+                </div>
+              </div>
+            </div>
+            <MaskFormFields form={form} setForm={setForm} />
+            {error && <p className="text-[12px] text-red-500">{error}</p>}
+            <div className="flex gap-2.5 pt-1">
+              <button className={btnGhost} onClick={() => setEditPolicy(null)}>Cancel</button>
+              <button className={btnPrimary} disabled={saving} onClick={saveEdit}>
+                {saving ? 'Saving…' : 'Update Policy'}
               </button>
             </div>
           </div>
@@ -359,23 +436,23 @@ function RowFiltersTab() {
               <TableHead cols={['Policy name', 'Object', 'Filter template', 'Applies to', 'Status', '']} />
               <tbody>
                 {policies.map(p => (
-                  <tr key={p.policyKey} className="border-t border-gray-50 hover:bg-gray-50 transition-colors">
-                    <td className="px-4 py-3 text-[13px] font-semibold text-gray-800">{p.policyName}</td>
-                    <td className="px-4 py-3 text-[13px] font-mono text-gray-600">{p.objectKey}</td>
+                  <tr key={p.policy_key} className="border-t border-gray-50 hover:bg-gray-50 transition-colors">
+                    <td className="px-4 py-3 text-[13px] font-semibold text-gray-800">{p.policy_name}</td>
+                    <td className="px-4 py-3 text-[13px] font-mono text-gray-600">{p.object_key}</td>
                     <td className="px-4 py-3 max-w-xs">
-                      <code className="text-[11.5px] font-mono text-violet-700 bg-violet-50 px-1.5 py-0.5 rounded">{p.filterTemplate}</code>
+                      <code className="text-[11.5px] font-mono text-violet-700 bg-violet-50 px-1.5 py-0.5 rounded">{p.filter_template}</code>
                     </td>
                     <td className="px-4 py-3 text-[12px] text-gray-500">
-                      {p.appliesToRoles?.length > 0 ? p.appliesToRoles.join(', ') : <span className="text-gray-400 font-medium">All roles</span>}
+                      {p.applies_to_roles?.length > 0 ? p.applies_to_roles.join(', ') : <span className="text-gray-400 font-medium">All roles</span>}
                     </td>
                     <td className="px-4 py-3">
-                      <button onClick={() => toggle(p.policyKey, p.isActive)}
-                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${p.isActive ? 'bg-emerald-500' : 'bg-gray-200'}`}>
-                        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${p.isActive ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                      <button onClick={() => toggle(p.policy_key, p.is_active)}
+                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${p.is_active ? 'bg-emerald-500' : 'bg-gray-200'}`}>
+                        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${p.is_active ? 'translate-x-4' : 'translate-x-0.5'}`} />
                       </button>
                     </td>
                     <td className="px-4 py-3">
-                      <button onClick={() => remove(p.policyKey)}
+                      <button onClick={() => remove(p.policy_key)}
                         className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-300 hover:text-red-500 hover:bg-red-50 transition-colors">
                         <Trash2 size={13} />
                       </button>
@@ -504,18 +581,18 @@ function ContractsTab() {
               <TableHead cols={['Contract', 'Object', 'Rule', 'Enforcement', 'Added', '']} />
               <tbody>
                 {contracts.map(c => (
-                  <tr key={c.contractKey} className="border-t border-gray-50 hover:bg-gray-50 transition-colors">
-                    <td className="px-4 py-3 text-[13px] font-semibold text-gray-800">{c.contractName}</td>
-                    <td className="px-4 py-3 text-[13px] font-mono text-gray-600">{c.objectKey}</td>
+                  <tr key={c.contract_key} className="border-t border-gray-50 hover:bg-gray-50 transition-colors">
+                    <td className="px-4 py-3 text-[13px] font-semibold text-gray-800">{c.contract_name}</td>
+                    <td className="px-4 py-3 text-[13px] font-mono text-gray-600">{c.object_key}</td>
                     <td className="px-4 py-3">
-                      <Badge text={c.ruleType.replace(/_/g, ' ').toLowerCase()} color="bg-gray-100 text-gray-600" />
+                      <Badge text={(c.rule_type || '').replace(/_/g, ' ').toLowerCase()} color="bg-gray-100 text-gray-600" />
                     </td>
                     <td className="px-4 py-3">
                       <Badge text={c.enforcement} color={enfColor(c.enforcement)} />
                     </td>
-                    <td className="px-4 py-3 text-[12px] text-gray-400">{c.createdBy}</td>
+                    <td className="px-4 py-3 text-[12px] text-gray-400">{c.created_by}</td>
                     <td className="px-4 py-3">
-                      <button onClick={() => remove(c.contractKey)}
+                      <button onClick={() => remove(c.contract_key)}
                         className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-300 hover:text-red-500 hover:bg-red-50 transition-colors">
                         <Trash2 size={13} />
                       </button>
