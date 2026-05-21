@@ -50,11 +50,13 @@ public class DataContractService {
      *         and the effective SQL to execute (may be rewritten if AUTO_REMEDIATE fired).
      */
     public ContractResult evaluate(String sql, List<String> objectKeys) {
-        if (sql == null || sql.isBlank() || objectKeys == null || objectKeys.isEmpty()) {
-            return ContractResult.passed(List.of());
-        }
+        if (sql == null || sql.isBlank()) return ContractResult.passed(List.of());
 
-        List<DataContract> contracts = contractRepository.findActiveByObjectKeys(objectKeys);
+        // Load all active contracts — do not filter by objectKeys.
+        // The LLM planner may omit object_keys; contracts must still be enforced.
+        List<DataContract> contracts = contractRepository.findAll().stream()
+                .filter(DataContract::isActive)
+                .toList();
         if (contracts.isEmpty()) return ContractResult.passed(List.of());
 
         List<String> checked      = new ArrayList<>();

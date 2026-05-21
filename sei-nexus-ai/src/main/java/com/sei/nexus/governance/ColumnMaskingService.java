@@ -45,20 +45,29 @@ public class ColumnMaskingService {
     }
 
     /**
-     * Apply all active column masking policies for the given object keys.
-     * Returns a {@link MaskResult} with the rewritten SQL and the names of
-     * masked columns (for the audit log).
+     * Apply all active column masking policies to a SQL statement.
+     *
+     * <p>Policies are loaded by loading <em>all</em> active policies for the tenant
+     * and matching them against column names that appear in the SELECT clause.
+     * We intentionally do NOT filter by the LLM-provided {@code objectKeys} because:
+     * <ul>
+     *   <li>The planner sometimes omits object_keys from its plan.</li>
+     *   <li>The planner sometimes uses a wrong or invented key.</li>
+     *   <li>For compliance, masking must fire regardless of planner accuracy.</li>
+     * </ul>
+     * The objectKeys parameter is accepted for API compatibility but is only used
+     * as an optional hint — policies are always loaded from all active policies.
      *
      * @param sql         The SQL string to rewrite (must be a SELECT statement).
      * @param userEmail   The authenticated user — used to check role exemptions.
-     * @param objectKeys  Data object keys referenced by the query.
+     * @param objectKeys  Hint only; not used to filter policy loading.
      */
     public MaskResult apply(String sql, String userEmail, List<String> objectKeys) {
-        if (sql == null || sql.isBlank() || objectKeys == null || objectKeys.isEmpty()) {
-            return MaskResult.passThrough(sql);
-        }
+        if (sql == null || sql.isBlank()) return MaskResult.passThrough(sql);
 
-        List<ColumnPolicy> policies = policyRepository.findByObjectKeys(objectKeys);
+        // Always load all policies — do NOT filter by objectKeys.
+        // Column name matching inside the SELECT clause is the real guard.
+        List<ColumnPolicy> policies = policyRepository.findAll();
         if (policies.isEmpty()) return MaskResult.passThrough(sql);
 
         String userRole = userAttributesRepository.getRole(userEmail);

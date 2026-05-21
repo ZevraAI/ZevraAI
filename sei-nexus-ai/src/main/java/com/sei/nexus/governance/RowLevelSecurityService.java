@@ -45,18 +45,26 @@ public class RowLevelSecurityService {
     }
 
     /**
-     * Apply all active RLS policies for the query's object keys.
+     * Apply all active RLS policies to a SQL statement.
+     *
+     * <p>All active RLS policies are loaded, not just those matching
+     * {@code objectKeys}. The LLM planner regularly omits or misspells
+     * object_keys, and row-level security must not depend on planner accuracy.
+     * Each policy's filter_template is only injected if the policy's
+     * {@code object_key} loosely matches a table name in the SQL — this prevents
+     * injecting unrelated WHERE conditions when the filter column doesn't exist.
      *
      * @param sql         SQL statement to rewrite.
      * @param userEmail   Authenticated user's email.
-     * @param objectKeys  Data object keys referenced by the query.
+     * @param objectKeys  Hint only; not used to filter policy loading.
      */
     public RlsResult apply(String sql, String userEmail, List<String> objectKeys) {
-        if (sql == null || sql.isBlank() || objectKeys == null || objectKeys.isEmpty()) {
-            return RlsResult.passThrough(sql);
-        }
+        if (sql == null || sql.isBlank()) return RlsResult.passThrough(sql);
 
-        List<RlsPolicy> policies = policyRepository.findActiveByObjectKeys(objectKeys);
+        // Always load all active policies and apply those relevant to this SQL.
+        List<RlsPolicy> policies = policyRepository.findAll().stream()
+                .filter(RlsPolicy::isActive)
+                .toList();
         if (policies.isEmpty()) return RlsResult.passThrough(sql);
 
         String userRole       = userAttributesRepository.getRole(userEmail);
