@@ -5,7 +5,7 @@ import {
   Layers, Plus, ChevronDown, ChevronRight,
   ArrowLeftRight, BookOpen, Pencil, Trash2,
   Sparkles, Database, Check, X, ChevronLeft,
-  AlertCircle, Search, Brain,
+  AlertCircle, Search, Brain, Package,
 } from 'lucide-react';
 
 function safeArray(v) { return Array.isArray(v) ? v : []; }
@@ -916,6 +916,12 @@ export default function Semantic() {
   const [learningsLoading, setLearningsLoading] = useState(false);
   const [editLearning, setEditLearning] = useState(null);
   const [editSqlPattern, setEditSqlPattern] = useState('');
+  const [allPacks,     setAllPacks]     = useState([]);
+  const [appliedPacks, setAppliedPacks] = useState([]);
+  const [packsLoading, setPacksLoading] = useState(false);
+  const [previewPack,  setPreviewPack]  = useState(null);
+  const [previewData,  setPreviewData]  = useState(null);
+  const [applyingPack, setApplyingPack] = useState('');
 
   // discovery wizard
   const [showWizard, setShowWizard] = useState(false);
@@ -979,6 +985,23 @@ export default function Semantic() {
   useEffect(() => {
     if (tab === 'learned' && selectedDomain) loadLearnings(selectedDomain);
   }, [tab, selectedDomain]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const loadPacks = useCallback(async () => {
+    setPacksLoading(true);
+    try {
+      const [all, applied] = await Promise.all([
+        api.industryPacks.list(),
+        api.industryPacks.applied(),
+      ]);
+      setAllPacks(all);
+      setAppliedPacks(applied);
+    } catch { setAllPacks([]); setAppliedPacks([]); }
+    finally { setPacksLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    if (tab === 'packs') loadPacks();
+  }, [tab, loadPacks]);
 
   const reload = async (dk) => {
     const key = dk || selectedDomain;
@@ -1116,6 +1139,7 @@ export default function Semantic() {
           <span className="text-[13px] font-semibold text-[#111827]">
             {tab === 'entities' ? `Entities (${entities.length})`
              : tab === 'vocab'  ? `Vocabulary (${vocab.length})`
+             : tab === 'packs'  ? `Packs (${allPacks.length})`
              : `Learned (${learnings.length})`}
           </span>
           <button
@@ -1128,11 +1152,13 @@ export default function Semantic() {
 
         {/* Tab toggle */}
         <div className="flex border-b border-gray-200/70 flex-shrink-0">
-          {[['entities', 'Entities'], ['vocab', 'Vocabulary'], ['learned', 'Learned']].map(([k, l]) => (
+          {[['entities', 'Entities'], ['vocab', 'Vocabulary'], ['learned', 'Learned'], ['packs', 'Packs']].map(([k, l]) => (
             <button key={k} onClick={() => setTab(k)}
-              className={`flex-1 py-2 text-[11.5px] font-medium transition-colors flex items-center justify-center gap-1
+              className={`flex-1 py-2 text-[11px] font-medium transition-colors flex items-center justify-center gap-0.5
                 ${tab === k ? 'text-emerald-600 border-b-2 border-emerald-500' : 'text-[#9CA3AF] hover:text-[#374151]'}`}>
-              {k === 'learned' && <Brain size={10} />}{l}
+              {k === 'learned' && <Brain size={9} />}
+              {k === 'packs'   && <Package size={9} />}
+              {l}
             </button>
           ))}
         </div>
@@ -1151,7 +1177,7 @@ export default function Semantic() {
 
         {/* List */}
         <div className="overflow-y-auto flex-1">
-          {(loading && tab !== 'learned') || (learningsLoading && tab === 'learned') ? (
+          {(loading && tab !== 'learned' && tab !== 'packs') || (learningsLoading && tab === 'learned') || (packsLoading && tab === 'packs') ? (
             <div className="flex justify-center py-10"><Spinner /></div>
           ) : tab === 'entities' ? (
             entities.length === 0 ? (
@@ -1182,7 +1208,7 @@ export default function Semantic() {
                 <div className="text-[11px] text-[#9CA3AF] mt-0.5 truncate">{v.definition}</div>
               </div>
             ))
-          ) : (
+          ) : tab === 'learned' ? (
             /* Learned tab — inline list with actions */
             learnings.length === 0 ? (
               <div className="px-4 py-8 text-center">
@@ -1234,6 +1260,31 @@ export default function Semantic() {
                 </div>
               </div>
             ))
+          ) : (
+            /* Packs tab — browse available packs */
+            allPacks.length === 0 ? (
+              <div className="px-4 py-8 text-center text-[12px] text-[#9CA3AF]">Loading packs…</div>
+            ) : allPacks.map(p => {
+              const isApplied = appliedPacks.some(a => a.pack_key === p.pack_id && a.status === 'ACTIVE');
+              return (
+                <div key={p.pack_id}
+                  onClick={() => setPreviewPack(p)}
+                  className={`px-4 py-3 cursor-pointer border-b border-gray-100/80 transition-colors
+                    ${previewPack?.pack_id === p.pack_id
+                      ? 'bg-emerald-50/80 border-l-2 border-l-emerald-500'
+                      : 'hover:bg-gray-50/60'}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[13px] font-semibold text-[#111827]">{p.display_name}</span>
+                    {isApplied && (
+                      <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-full shrink-0">Applied</span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-[#9CA3AF] mt-0.5">
+                    {p.entity_count} entities · {p.vocab_count} terms
+                  </div>
+                </div>
+              );
+            })
           )}
         </div>
 
@@ -1324,6 +1375,169 @@ export default function Semantic() {
                       Save
                     </button>
                   </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : tab === 'packs' ? (
+        /* ── Industry Packs right panel ── */
+        <div className="flex-1 min-w-0 overflow-y-auto p-7">
+          <div className="max-w-3xl">
+            {/* Header */}
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-10 h-10 rounded-2xl bg-indigo-50 flex items-center justify-center">
+                <Package size={20} className="text-indigo-600" />
+              </div>
+              <div>
+                <h2 className="text-[18px] font-bold text-[#111827] tracking-tight">Industry Context Packs</h2>
+                <p className="text-[13px] text-[#9CA3AF]">
+                  Pre-built entities, vocabulary, and suggested questions for your industry.
+                </p>
+              </div>
+            </div>
+
+            {/* Applied packs */}
+            {appliedPacks.filter(a => a.status === 'ACTIVE').length > 0 && (
+              <div className="mb-6">
+                <p className="text-[12px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Applied</p>
+                <div className="space-y-2">
+                  {appliedPacks.filter(a => a.status === 'ACTIVE').map(tp => (
+                    <div key={tp.pack_key} className="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3 flex items-center justify-between">
+                      <div>
+                        <p className="text-[13px] font-semibold text-emerald-800">{tp.display_name}</p>
+                        <p className="text-[11.5px] text-emerald-600 mt-0.5">
+                          Coverage: {Math.round((tp.coverage_score || 0) * 100)}% of pack entities matched
+                        </p>
+                      </div>
+                      <button onClick={async () => {
+                        if (!window.confirm(`Remove pack "${tp.display_name}"? This does not delete created entities or vocabulary.`)) return;
+                        await api.industryPacks.remove(tp.pack_key);
+                        loadPacks();
+                      }} className="text-[11px] text-emerald-600 hover:text-red-500 transition-colors ml-4">
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Pack detail or browse */}
+            {previewPack ? (
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">{previewPack.industry}</p>
+                    <h3 className="text-[17px] font-bold text-[#111827]">{previewPack.display_name}</h3>
+                  </div>
+                  <button onClick={() => { setPreviewPack(null); setPreviewData(null); }}
+                    className="text-[12px] text-gray-400 hover:text-gray-700">← Back</button>
+                </div>
+
+                <p className="text-[13px] text-gray-500 mb-5">{previewPack.description}</p>
+
+                {/* Stats row */}
+                <div className="grid grid-cols-3 gap-3 mb-6">
+                  {[
+                    { label: 'Entities',   value: previewPack.entity_count },
+                    { label: 'Vocab terms', value: previewPack.vocab_count },
+                    { label: 'Questions',  value: previewPack.question_count },
+                  ].map(({ label, value }) => (
+                    <div key={label} className="bg-white rounded-xl border border-gray-100 p-3 text-center">
+                      <p className="text-[20px] font-black text-[#111827]">{value}</p>
+                      <p className="text-[11px] text-[#9CA3AF]">{label}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Preview data */}
+                {previewData && (
+                  <div className="mb-5 p-4 bg-gray-50 rounded-xl border border-gray-100">
+                    <p className="text-[12px] font-semibold text-gray-600 mb-2">Preview result</p>
+                    <p className="text-[12.5px] text-gray-700">
+                      Coverage: <strong>{Math.round(previewData.coverage_score * 100)}%</strong> of pack entities matched to your tables.
+                    </p>
+                    {previewData.entity_mapping && Object.keys(previewData.entity_mapping).length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        {Object.entries(previewData.entity_mapping).map(([entity, table]) => (
+                          <div key={entity} className="flex items-center gap-2 text-[11.5px]">
+                            <span className="font-semibold text-gray-700">{entity}</span>
+                            <span className="text-gray-400">→</span>
+                            <span className="font-mono text-emerald-700">{table}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {previewData.entities_unmatched?.length > 0 && (
+                      <p className="text-[11.5px] text-amber-600 mt-2">
+                        Not matched: {previewData.entities_unmatched.join(', ')}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Action buttons */}
+                <div className="flex gap-3 flex-wrap">
+                  {!previewData && (
+                    <button onClick={async () => {
+                      setPreviewData(await api.industryPacks.preview(previewPack.pack_id, { domainKey: selectedDomain }));
+                    }} className="px-4 py-2 text-[13px] font-semibold bg-white border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-all">
+                      Preview match
+                    </button>
+                  )}
+                  {appliedPacks.some(a => a.pack_key === previewPack.pack_id && a.status === 'ACTIVE') ? (
+                    <span className="px-4 py-2 text-[13px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl">
+                      ✓ Already applied
+                    </span>
+                  ) : (
+                    <button
+                      disabled={applyingPack === previewPack.pack_id}
+                      onClick={async () => {
+                        if (!selectedDomain) { alert('Select a domain first.'); return; }
+                        setApplyingPack(previewPack.pack_id);
+                        try {
+                          await api.industryPacks.apply(previewPack.pack_id, { domainKey: selectedDomain });
+                          await loadPacks();
+                          alert(`Pack "${previewPack.display_name}" applied! Refresh the Entities and Vocabulary tabs to see what was added.`);
+                        } catch (e) { alert(e.message || 'Apply failed'); }
+                        finally { setApplyingPack(''); }
+                      }}
+                      className="px-5 py-2 text-[13px] font-semibold bg-[#0C5847] hover:bg-[#084B3D] text-white rounded-xl transition-all disabled:opacity-50"
+                    >
+                      {applyingPack === previewPack.pack_id ? 'Applying…' : 'Apply Pack'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div>
+                <p className="text-[12px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Available packs</p>
+                <div className="grid sm:grid-cols-2 gap-4">
+                  {allPacks.map(p => {
+                    const isApplied = appliedPacks.some(a => a.pack_key === p.pack_id && a.status === 'ACTIVE');
+                    return (
+                      <button key={p.pack_id} onClick={() => { setPreviewPack(p); setPreviewData(null); }}
+                        className="text-left bg-white border border-gray-100 rounded-2xl p-4 hover:border-indigo-200 hover:shadow-md transition-all group">
+                        <div className="flex items-start justify-between gap-2 mb-2">
+                          <div>
+                            <p className="text-[11px] font-bold text-indigo-500 uppercase tracking-wide">{p.industry}</p>
+                            <p className="text-[14px] font-bold text-[#111827] mt-0.5 group-hover:text-indigo-700 transition-colors">{p.display_name}</p>
+                          </div>
+                          {isApplied && (
+                            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full shrink-0">Applied</span>
+                          )}
+                        </div>
+                        <div className="flex gap-3 text-[11.5px] text-gray-500">
+                          <span>{p.entity_count} entities</span>
+                          <span>·</span>
+                          <span>{p.vocab_count} terms</span>
+                          <span>·</span>
+                          <span>{p.question_count} questions</span>
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             )}

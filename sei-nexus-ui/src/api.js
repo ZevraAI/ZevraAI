@@ -244,6 +244,17 @@ export const api = {
     run:    (key)        => post(`/reports/${key}/run`),
   },
 
+  // ── Industry Context Packs ─────────────────────────────────────────────────
+  industryPacks: {
+    list:    ()                      => get('/industry-packs'),
+    get:     (packKey)               => get(`/industry-packs/${packKey}`),
+    applied: ()                      => get('/industry-packs/applied'),
+    recommend: (domainKey)           => get(`/industry-packs/recommend${domainKey ? `?domainKey=${encodeURIComponent(domainKey)}` : ''}`),
+    preview: (packKey, body)         => post(`/industry-packs/${packKey}/preview`, body || {}),
+    apply:   (packKey, body)         => post(`/industry-packs/${packKey}/apply`, body),
+    remove:  (packKey)               => del(`/industry-packs/applied/${packKey}`),
+  },
+
   // ── Governance Hub ─────────────────────────────────────────────────────────
   governance: {
     columnPolicies: {
